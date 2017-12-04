@@ -1,8 +1,6 @@
 const std = @import("std");
 
 const general_allocator = &std.heap.c_allocator;
-const Dir = std.os.Dir;
-const Buffer = std.Buffer;
 
 error Usage;
 fn usage() -> error {
@@ -11,6 +9,8 @@ fn usage() -> error {
 }
 
 error NotAZipFile;
+error FileTooBig;
+error MultiDiskZipfileNotSupported;
 
 pub fn main() -> %void {
     var args = std.os.args();
@@ -19,81 +19,219 @@ pub fn main() -> %void {
     const output_path_str = args.nextPosix() ?? return usage();
     if (args.nextPosix() != null) return usage();
 
-    var tmp_path = %return Buffer.init(general_allocator, output_path_str);
-    %return tmp_path.append(".tmp");
-
-    %return cleanOutputDir(&tmp_path);
-    %return ensureDirExists(tmp_path);
-
     var input_file = %return std.io.File.openRead(input_path_str, general_allocator);
     defer input_file.close();
 
-    var zipfile_reader = ZipfileReader.init(&input_file, &tmp_path, general_allocator);
-    %return zipfile_reader.doIt();
+    // TODO: it would be slightly politer to wait until we've done some basic validation on the input
+    var output_file = %return std.io.File.openWrite(output_path_str, general_allocator);
+    defer output_file.close();
 
-    //%return cleanOutputDir(&tmp_path);
+    var zipfile_dumper: ZipfileDumper = undefined;
+    %return zipfile_dumper.init(&input_file, &output_file, general_allocator);
+    %return zipfile_dumper.doIt();
 }
 
-const ZipfileReader = struct {
-    input_file: &std.io.File,
-    input_file_stream_impl: std.io.FileInStream,
-    tmp_path: &Buffer,
-    allocator: &std.mem.Allocator,
-    segment_count: usize,
+const SegmentList = std.ArrayList(Segment);
+const SegmentKind = enum {
+    LocalFile: LocalFileInfo,
+    CentralDirectoryEntries,
+    EndOfCentralDirectory: EndOfCentralDirectoryInfo,
+};
+const Segment = struct {
+    offset: u64,
+    kind: SegmentKind,
+};
+const LocalFileInfo = struct {
+    compressed_size: u64,
+    is_zip64: bool,
+};
+const EndOfCentralDirectoryInfo = struct {
+    eocdr_offset: u64,
+};
+fn cmpSegments(a: &const Segment, b: &const Segment) -> std.sort.Cmp {
+    if (a.offset < b.offset) return std.sort.Cmp.Less;
+    if (a.offset > b.offset) return std.sort.Cmp.Greater;
+    return std.sort.Cmp.Equal;
+}
 
-    pub fn init(input_file: &std.io.File, tmp_path: &Buffer, allocator: &std.mem.Allocator) -> ZipfileReader {
-        return ZipfileReader {
-            .input_file = input_file,
-            .input_file_stream_impl = std.io.FileInStream.init(input_file),
-            .tmp_path = tmp_path,
-            .allocator = allocator,
-            .segment_count = 0,
-        };
+
+const ZipfileDumper = struct {
+    const Self = this;
+
+    input_file: &std.io.File,
+    input_file_stream: std.io.FileInStream,
+    input: &std.io.InStream,
+    file_size: u64,
+    output_file: &std.io.File,
+    output_file_stream: std.io.FileOutStream,
+    buffered_output_stream: std.io.BufferedOutStream,
+    output: &std.io.OutStream,
+    allocator: &std.mem.Allocator,
+    segments: SegmentList,
+
+    pub fn init(self: &Self, input_file: &std.io.File, output_file: &std.io.File, allocator: &std.mem.Allocator) -> %void {
+        // TODO: return a new object once we have https://github.com/zig-lang/zig/issues/287
+
+        self.input_file = input_file;
+        self.input_file_stream = std.io.FileInStream.init(self.input_file);
+        self.input = &self.input_file_stream.stream;
+        self.file_size = u64(%return self.input_file.getEndPos()); // TODO: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
+        // this limit eliminates most silly overflow checks on the file offset.
+        if (self.file_size > 0x7fffffffffffffff) return error.FileTooBig;
+
+        self.output_file = output_file;
+        self.output_file_stream = std.io.FileOutStream.init(self.output_file);
+        self.buffered_output_stream = std.io.BufferedOutStream.init(&self.output_file_stream.stream);
+        self.output = &self.buffered_output_stream.stream;
+
+        self.allocator = allocator;
+        self.segments = SegmentList.init(allocator);
     }
 
-    pub fn doIt(self: &ZipfileReader) -> %void {
-        const file_size = u64(%return self.input_file.getEndPos()); // TODO: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
+    pub fn doIt(self: &Self) -> %void {
+        %return self.findSegments();
+        %return self.dumpSegments();
+        %return self.buffered_output_stream.flush();
+    }
 
-        if (file_size < 22) return error.NotAZipFile;
-        var eocdr_offset = file_size - 22;
-        %return self.input_file.seekTo(usize(eocdr_offset)); // TODO: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
+    fn findSegments(self: &Self) -> %void {
+
+        if (self.file_size < 22) return error.NotAZipFile;
+        var eocdr_offset = self.file_size - 22;
         var eocdr_buffer: [22]u8 = undefined;
-        %return self.readNoEof(eocdr_buffer[0..]);
+        %return self.readNoEof(eocdr_offset, eocdr_buffer[0..]);
 
+        // TODO: search backwards over the zipfile comment
         const signature = readInt32(eocdr_buffer, 0);
         if (signature != 0x06054b50) return error.NotAZipFile;
-        // TODO: search backwards over the comment
+        %return self.segments.append(Segment{
+            .offset = eocdr_offset,
+            .kind = SegmentKind.EndOfCentralDirectory{EndOfCentralDirectoryInfo{
+                .eocdr_offset = eocdr_offset,
+            }},
+        });
 
-        {
-            var segment: Segment = undefined;
-            %return self.openSegment(&segment, eocdr_offset);
-            defer segment.file.close();
+        const disk_number = readInt16(eocdr_buffer, 4);
+        if (disk_number != 0) return error.MultiDiskZipfileNotSupported;
 
-            %return self.readEocdr(&segment, "End of Central Directory Record", eocdr_buffer[0..]);
+        var entry_count: u32 = readInt16(eocdr_buffer, 10);
+        var central_directory_offset: u64 = readInt32(eocdr_buffer, 16);
+        // TODO: check for ZIP64 format
 
-            %return segment.buffered_output_stream.flush();
+        if (entry_count > 0) {
+            %return self.segments.append(Segment{
+                .offset = central_directory_offset,
+                .kind = SegmentKind.CentralDirectoryEntries,
+            });
+        }
+
+        var central_directory_cursor: u64 = central_directory_offset;
+        {var remaining_entries: u32 = entry_count; while (remaining_entries > 0) : (remaining_entries -= 1) {
+            var cdr_buffer: [46]u8 = undefined;
+            %return self.readNoEof(central_directory_cursor, cdr_buffer[0..]);
+
+            var compressed_size: u64 = readInt32(cdr_buffer, 20);
+            const file_name_length = readInt16(cdr_buffer, 28);
+            const extra_fields_length = readInt16(cdr_buffer, 30);
+            const file_comment_length = readInt16(cdr_buffer, 32);
+            var relative_offset_of_local_header: u64 = readInt32(cdr_buffer, 42);
+
+            // TODO: check for ZIP64 format
+            var is_zip64 = false;
+
+            %return self.segments.append(Segment{
+                .offset = relative_offset_of_local_header,
+                .kind = SegmentKind.LocalFile{LocalFileInfo{
+                    .is_zip64 = false,
+                    .compressed_size = compressed_size,
+                }},
+            });
+
+            central_directory_cursor += 46;
+            central_directory_cursor += file_name_length;
+            central_directory_cursor += extra_fields_length;
+            central_directory_cursor += file_comment_length;
+        }}
+    }
+
+    fn dumpSegments(self: &Self) -> %void {
+        std.sort.sort_stable(Segment, self.segments.toSlice(), cmpSegments);
+
+        var cursor: u64 = 0;
+        for (self.segments.toSliceConst()) |segment, i| {
+            if (i != 0) {
+                %return self.output.print("\n");
+            }
+
+            if (segment.offset > cursor) {
+                // TODO: unused space
+                cursor = segment.offset;
+            } else if (segment.offset < cursor) {
+                // TODO: overlapping regions
+                cursor = segment.offset;
+            }
+
+            const length = switch (segment.kind) {
+                SegmentKind.LocalFile => |info| %return self.dumpLocalFile(segment.offset, info),
+                SegmentKind.CentralDirectoryEntries => %return self.dumpCentralDirectoryEntries(segment.offset),
+                SegmentKind.EndOfCentralDirectory => |info| %return self.dumpEndOfCentralDirectory(segment.offset, info),
+            };
+            cursor += length;
         }
     }
 
-    fn writeSegmentHeader(self: &ZipfileReader, segment: &Segment, name: []const u8) -> %void {
-        %return segment.buffered_output_stream.stream.print(":0x{x16} ; {}\n", segment.offset, name);
+    fn dumpLocalFile(self: &Self, offset: u64, info: &const LocalFileInfo) -> %u64 {
+        // TODO
+        return 0;
     }
 
-    fn readEocdr(self: &ZipfileReader, segment: &Segment, name: []const u8, buffer: []const u8) -> %void {
-        %return self.writeSegmentHeader(segment, name);
-
-        var cursor: usize = 0;
-        %return self.readStructField(segment, buffer, 4, &cursor, 4, "End of central directory signature");
-        %return self.readStructField(segment, buffer, 4, &cursor, 2, "Number of this disk");
-        %return self.readStructField(segment, buffer, 4, &cursor, 2, "Disk where central directory starts");
-        %return self.readStructField(segment, buffer, 4, &cursor, 2, "Number of central directory records on this disk");
-        %return self.readStructField(segment, buffer, 4, &cursor, 2, "Total number of central directory records");
-        %return self.readStructField(segment, buffer, 4, &cursor, 4, "Size of central directory (bytes)");
-        %return self.readStructField(segment, buffer, 4, &cursor, 4, "Offset of start of central directory, relative to start of archive");
-        %return self.readStructField(segment, buffer, 4, &cursor, 2, "Comment Length");
+    fn dumpCentralDirectoryEntries(self: &Self, offset: u64) -> %u64 {
+        // TODO
+        return 0;
     }
 
-    fn readStructField(self: &ZipfileReader, segment: &Segment, buffer: []const u8, comptime max_size: usize, cursor: &usize,
+    fn dumpEndOfCentralDirectory(self: &Self, offset: u64, info: &const EndOfCentralDirectoryInfo) -> %u64 {
+        var total_length: u64 = 0;
+        if (offset != info.eocdr_offset) {
+            const zip64_eocdl_offset = info.eocdr_offset - 20;
+            %return self.writeSectionHeader(offset, "Zip64 end of central directory record");
+            // TODO
+
+            %return self.writeSectionHeader(zip64_eocdl_offset, "Zip64 end of central directory locator");
+            // TODO
+
+            total_length = info.eocdr_offset - offset;
+        }
+
+        %return self.writeSectionHeader(offset + total_length, "End of central directory record");
+        var eocdr_buffer: [22]u8 = undefined;
+        %return self.readNoEof(offset, eocdr_buffer[0..]);
+        var eocdr_cursor: usize = 0;
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "End of central directory signature");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Number of this disk");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Disk where central directory starts");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Number of central directory records on this disk");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Total number of central directory records");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "Size of central directory (bytes)");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "Offset of start of central directory, relative to start of archive");
+        %return self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Comment Length");
+        const comment_length = readInt16(eocdr_buffer, 20);
+        total_length += 22;
+
+        if (comment_length > 0) {
+            %return self.writeSectionHeader(offset + total_length, ".ZIP file comment");
+            // TODO: self.dumpCp437Blob(offset + total_length, comment_length);
+            total_length += comment_length;
+        }
+
+        return total_length;
+    }
+
+    fn writeSectionHeader(self: &Self, offset: u64, name: []const u8) -> %void {
+        %return self.output.print(":0x{x16} ; {}\n", offset, name);
+    }
+
+    fn readStructField(self: &Self, buffer: []const u8, comptime max_size: usize, cursor: &usize,
         comptime size: usize, name: []const u8) -> %void
     {
         comptime std.debug.assert(size <= max_size);
@@ -106,7 +244,7 @@ const ZipfileReader = struct {
         switch (size) {
             2 => {
                 var value = readInt16(buffer, *cursor);
-                %return segment.buffered_output_stream.stream.print(
+                %return self.output.print(
                     "{x2} {x2}" ++ ("   " ** (max_size - size)) ++
                     " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
                     " ; {d" ++ decimal_width_str ++ "}" ++
@@ -122,7 +260,7 @@ const ZipfileReader = struct {
             },
             4 => {
                 var value = readInt32(buffer, *cursor);
-                %return segment.buffered_output_stream.stream.print(
+                %return self.output.print(
                     "{x2} {x2} {x2} {x2}" ++ ("   " ** (max_size - size)) ++
                     " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
                     " ; {d" ++ decimal_width_str ++ "}" ++
@@ -144,30 +282,9 @@ const ZipfileReader = struct {
         *cursor += size;
     }
 
-    const Segment = struct {
-        offset: u64,
-        length: u64,
-        file: std.io.File,
-        file_stream: std.io.FileOutStream,
-        buffered_output_stream: std.io.BufferedOutStream,
-    };
-
-    fn openSegment(self: &ZipfileReader, segment: &Segment, offset: u64) -> %void {
-        const original_path_len = self.tmp_path.len();
-        %return self.tmp_path.appendFormat("/{}", self.segment_count);
-        self.segment_count += 1;
-        defer self.tmp_path.shrink(original_path_len);
-
-        // TODO: refeactor once we have https://github.com/zig-lang/zig/issues/287
-        segment.offset = offset;
-        segment.length = 0;
-        segment.file = %return std.io.File.openWrite(self.tmp_path.toSliceConst(), self.allocator);
-        segment.file_stream = std.io.FileOutStream.init(&segment.file);
-        segment.buffered_output_stream = std.io.BufferedOutStream.init(&segment.file_stream.stream);
-    }
-
-    fn readNoEof(self: &ZipfileReader, buffer: []u8) -> %void {
-        return self.input_file_stream_impl.stream.readNoEof(buffer);
+    fn readNoEof(self: &Self, offset: u64, buffer: []u8) -> %void {
+        %return self.input_file.seekTo(usize(offset)); // TODO: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
+        %return self.input.readNoEof(buffer);
     }
 };
 
@@ -202,37 +319,3 @@ const cp437 = [][]const u8{
     "α","ß","Γ", "π","Σ","σ","µ","τ","Φ","Θ","Ω","δ","∞", "φ","ε","∩",
     "≡","±","≥", "≤","⌠","⌡","÷","≈","°","∙","·","√","ⁿ", "²","■"," ",
 };
-
-fn ensureDirExists(path: &const Buffer) -> %void {
-    std.os.makeDir(general_allocator, path.toSliceConst()) %% |err| {
-        switch (err) {
-            error.PathAlreadyExists => {
-                // TODO: But is it really a directory?
-                // Otherwise, assume it's all good.
-            },
-            else => return err,
-        }
-    };
-}
-
-fn cleanOutputDir(path: &Buffer) -> %void {
-    {
-        var dir = Dir.open(general_allocator, path.toSliceConst()) %% |err| switch (err) {
-            error.PathNotFound => return,
-            else => return err,
-        };
-        defer dir.close();
-
-        const original_path_len = path.len();
-        while (%return dir.next()) |entry| {
-            %return path.appendByte('/');
-            %return path.append(entry.name);
-            defer path.shrink(original_path_len);
-
-            %return std.os.deleteFile(general_allocator, path.toSliceConst());
-        }
-    }
-
-    %return std.os.deleteDir(general_allocator, path.toSliceConst());
-}
-
