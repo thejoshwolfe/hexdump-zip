@@ -22,7 +22,6 @@ pub fn main() -> %void {
     var input_file = %return std.io.File.openRead(input_path_str, general_allocator);
     defer input_file.close();
 
-    // TODO: it would be slightly politer to wait until we've done some basic validation on the input
     var output_file = %return std.io.File.openWrite(output_path_str, general_allocator);
     defer output_file.close();
 
@@ -32,7 +31,7 @@ pub fn main() -> %void {
 }
 
 const SegmentList = std.ArrayList(Segment);
-const SegmentKind = enum {
+const SegmentKind = union(enum) {
     LocalFile: LocalFileInfo,
     CentralDirectoryEntries,
     EndOfCentralDirectory: EndOfCentralDirectoryInfo,
@@ -48,12 +47,13 @@ const LocalFileInfo = struct {
 const EndOfCentralDirectoryInfo = struct {
     eocdr_offset: u64,
 };
-fn cmpSegments(a: &const Segment, b: &const Segment) -> std.sort.Cmp {
-    if (a.offset < b.offset) return std.sort.Cmp.Less;
-    if (a.offset > b.offset) return std.sort.Cmp.Greater;
-    return std.sort.Cmp.Equal;
+fn segmentLessThan(a: &const Segment, b: &const Segment) -> bool {
+    return a.offset < b.offset;
 }
 
+
+const eocdr_size = 22;
+const eocdr_search_size: u64 = 0xffff + eocdr_size;
 
 const ZipfileDumper = struct {
     const Self = this;
@@ -95,18 +95,30 @@ const ZipfileDumper = struct {
     }
 
     fn findSegments(self: &Self) -> %void {
+        // find the eocdr
+        if (self.file_size < eocdr_size) return error.NotAZipFile;
+        var eocdr_search_buffer: [eocdr_search_size]u8 = undefined;
+        const eocdr_search_slice = eocdr_search_buffer[0..usize(std.math.min(self.file_size, eocdr_search_size))];
+        %return self.readNoEof(self.file_size - eocdr_search_slice.len, eocdr_search_slice);
+        // seek backward over the comment looking for the signature
+        var comment_length: u16 = 0;
+        var eocdr_buffer: []const u8 = undefined;
+        while (true) : (comment_length += 1) {
+            var cursor = eocdr_search_slice.len - comment_length - eocdr_size;
+            if (readInt32(eocdr_search_slice, cursor) == 0x06054b50) {
+                // found it
+                eocdr_buffer = eocdr_search_slice[cursor..cursor + eocdr_size];
+                break;
+            }
+            if (cursor == 0) return error.NotAZipFile;
+        }
+        const eocdr_offset = self.file_size - comment_length - eocdr_size;
 
-        if (self.file_size < 22) return error.NotAZipFile;
-        var eocdr_offset = self.file_size - 22;
-        var eocdr_buffer: [22]u8 = undefined;
-        %return self.readNoEof(eocdr_offset, eocdr_buffer[0..]);
-
-        // TODO: search backwards over the zipfile comment
         const signature = readInt32(eocdr_buffer, 0);
         if (signature != 0x06054b50) return error.NotAZipFile;
         %return self.segments.append(Segment{
             .offset = eocdr_offset,
-            .kind = SegmentKind.EndOfCentralDirectory{EndOfCentralDirectoryInfo{
+            .kind = SegmentKind{.EndOfCentralDirectory = EndOfCentralDirectoryInfo{
                 .eocdr_offset = eocdr_offset,
             }},
         });
@@ -141,7 +153,7 @@ const ZipfileDumper = struct {
 
             %return self.segments.append(Segment{
                 .offset = relative_offset_of_local_header,
-                .kind = SegmentKind.LocalFile{LocalFileInfo{
+                .kind = SegmentKind{.LocalFile = LocalFileInfo{
                     .is_zip64 = false,
                     .compressed_size = compressed_size,
                 }},
@@ -155,7 +167,7 @@ const ZipfileDumper = struct {
     }
 
     fn dumpSegments(self: &Self) -> %void {
-        std.sort.sort_stable(Segment, self.segments.toSlice(), cmpSegments);
+        std.sort.insertionSort(Segment, self.segments.toSlice(), segmentLessThan);
 
         var cursor: u64 = 0;
         for (self.segments.toSliceConst()) |segment, i| {
