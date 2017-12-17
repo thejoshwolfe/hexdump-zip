@@ -33,7 +33,7 @@ pub fn main() -> %void {
 const SegmentList = std.ArrayList(Segment);
 const SegmentKind = union(enum) {
     LocalFile: LocalFileInfo,
-    CentralDirectoryEntries,
+    CentralDirectoryEntries: CentralDirectoryEntriesInfo,
     EndOfCentralDirectory: EndOfCentralDirectoryInfo,
 };
 const Segment = struct {
@@ -46,6 +46,9 @@ const LocalFileInfo = struct {
 };
 const EndOfCentralDirectoryInfo = struct {
     eocdr_offset: u64,
+};
+const CentralDirectoryEntriesInfo = struct {
+    entry_count: u32,
 };
 fn segmentLessThan(a: &const Segment, b: &const Segment) -> bool {
     return a.offset < b.offset;
@@ -133,7 +136,9 @@ const ZipfileDumper = struct {
         if (entry_count > 0) {
             %return self.segments.append(Segment{
                 .offset = central_directory_offset,
-                .kind = SegmentKind.CentralDirectoryEntries,
+                .kind = SegmentKind{.CentralDirectoryEntries = CentralDirectoryEntriesInfo{
+                    .entry_count = entry_count,
+                }},
             });
         }
 
@@ -176,16 +181,18 @@ const ZipfileDumper = struct {
             }
 
             if (segment.offset > cursor) {
-                // TODO: unused space
+                %return self.writeSectionHeader(cursor, "Unused space");
+                %return self.dumpBlobContents(cursor, segment.offset - cursor);
+                %return self.output.print("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
-                // TODO: overlapping regions
-                cursor = segment.offset;
+                @panic("TODO: overlapping regions");
+                //cursor = segment.offset;
             }
 
             const length = switch (segment.kind) {
                 SegmentKind.LocalFile => |info| %return self.dumpLocalFile(segment.offset, info),
-                SegmentKind.CentralDirectoryEntries => %return self.dumpCentralDirectoryEntries(segment.offset),
+                SegmentKind.CentralDirectoryEntries => |info| %return self.dumpCentralDirectoryEntries(segment.offset, info),
                 SegmentKind.EndOfCentralDirectory => |info| %return self.dumpEndOfCentralDirectory(segment.offset, info),
             };
             cursor += length;
@@ -197,7 +204,7 @@ const ZipfileDumper = struct {
         return 0;
     }
 
-    fn dumpCentralDirectoryEntries(self: &Self, offset: u64) -> %u64 {
+    fn dumpCentralDirectoryEntries(self: &Self, offset: u64, info: &const CentralDirectoryEntriesInfo) -> %u64 {
         // TODO
         return 0;
     }
@@ -237,6 +244,23 @@ const ZipfileDumper = struct {
         }
 
         return total_length;
+    }
+
+    fn dumpBlobContents(self: &Self, offset: u64, length: u64) -> %void {
+        var buffer: [0x1000]u8 = undefined;
+        const row_length = 16;
+
+        var cursor: u64 = 0;
+        while (cursor < length) {
+            const buffer_offset = offset + cursor;
+            %return self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
+            {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
+                %return self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
+                cursor += 1;
+            }}
+            %return self.output.print("{x2}\n", buffer[offset + cursor - buffer_offset]);
+            cursor += 1;
+        }
     }
 
     fn writeSectionHeader(self: &Self, offset: u64, name: []const u8) -> %void {
