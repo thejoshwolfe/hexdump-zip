@@ -72,6 +72,7 @@ const ZipfileDumper = struct {
     output: &std.io.OutStream,
     allocator: &std.mem.Allocator,
     segments: SegmentList,
+    indentation: u2,
 
     pub fn init(self: &Self, input_file: &std.io.File, output_file: &std.io.File, allocator: &std.mem.Allocator) -> %void {
         // TODO: return a new object once we have https://github.com/zig-lang/zig/issues/287
@@ -90,6 +91,7 @@ const ZipfileDumper = struct {
 
         self.allocator = allocator;
         self.segments = SegmentList.init(allocator);
+        self.indentation = 0;
     }
 
     pub fn doIt(self: &Self) -> %void {
@@ -228,15 +230,18 @@ const ZipfileDumper = struct {
         const extra_fields_length = readInt16(lfh_buffer, 28);
 
         if (file_name_length > 0) {
+            self.indent(); defer self.outdent();
             %return self.writeSectionHeader(cursor, "File Name");
             %return self.dumpBlobContents(cursor, file_name_length);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
+            self.indent(); defer self.outdent();
             %return self.writeSectionHeader(cursor, "Extra Fields");
             %return self.dumpBlobContents(cursor, extra_fields_length);
             cursor += extra_fields_length;
         }
+
         if (info.compressed_size > 0) {
             %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "File Contents (#{})", info.entry_index);
@@ -284,16 +289,19 @@ const ZipfileDumper = struct {
             const file_comment_length = readInt16(cdr_buffer, 32);
 
             if (file_name_length > 0) {
+                self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "File name");
                 %return self.dumpBlobContents(cursor, file_name_length);
                 cursor += file_name_length;
             }
             if (extra_fields_length > 0) {
+                self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "Extra Fields");
                 %return self.dumpBlobContents(cursor, extra_fields_length);
                 cursor += extra_fields_length;
             }
             if (file_comment_length > 0) {
+                self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "File Comment");
                 %return self.dumpBlobContents(cursor, file_comment_length);
                 cursor += file_comment_length;
@@ -332,6 +340,7 @@ const ZipfileDumper = struct {
         total_length += 22;
 
         if (comment_length > 0) {
+            self.indent(); defer self.outdent();
             %return self.writeSectionHeader(offset + total_length, ".ZIP file comment");
             // TODO: self.dumpCp437Blob(offset + total_length, comment_length);
             total_length += comment_length;
@@ -348,6 +357,7 @@ const ZipfileDumper = struct {
         while (cursor < length) {
             const buffer_offset = offset + cursor;
             %return self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
+            %return self.printIndentation();
             {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
                 %return self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
                 cursor += 1;
@@ -358,6 +368,7 @@ const ZipfileDumper = struct {
     }
 
     fn writeSectionHeader(self: &Self, offset: u64, comptime fmt: []const u8, args: ...) -> %void {
+        %return self.printIndentation();
         %return self.output.print(":0x{x16} ; ", offset);
         %return self.output.print(fmt, args);
         %return self.output.print("\n");
@@ -373,6 +384,8 @@ const ZipfileDumper = struct {
             8 => "20",
             else => unreachable,
         };
+
+        %return self.printIndentation();
         switch (size) {
             2 => {
                 var value = readInt16(buffer, *cursor);
@@ -412,6 +425,18 @@ const ZipfileDumper = struct {
             else => unreachable,
         }
         *cursor += size;
+    }
+
+    fn indent(self: &Self) {
+        self.indentation += 1;
+    }
+    fn outdent(self: &Self) {
+        self.indentation -= 1;
+    }
+    fn printIndentation(self: &Self) -> %void {
+        {var i: u2 = 0; while (i < self.indentation) : (i += 1) {
+            %return self.output.print("  ");
+        }}
     }
 
     fn readNoEof(self: &Self, offset: u64, buffer: []u8) -> %void {
