@@ -41,6 +41,7 @@ const Segment = struct {
     kind: SegmentKind,
 };
 const LocalFileInfo = struct {
+    entry_index: u32,
     compressed_size: u64,
     is_zip64: bool,
 };
@@ -143,7 +144,7 @@ const ZipfileDumper = struct {
         }
 
         var central_directory_cursor: u64 = central_directory_offset;
-        {var remaining_entries: u32 = entry_count; while (remaining_entries > 0) : (remaining_entries -= 1) {
+        {var entry_index: u32 = 0; while (entry_index < entry_count) : (entry_index += 1) {
             var cdr_buffer: [46]u8 = undefined;
             %return self.readNoEof(central_directory_cursor, cdr_buffer[0..]);
 
@@ -159,6 +160,7 @@ const ZipfileDumper = struct {
             %return self.segments.append(Segment{
                 .offset = relative_offset_of_local_header,
                 .kind = SegmentKind{.LocalFile = LocalFileInfo{
+                    .entry_index = entry_index,
                     .is_zip64 = false,
                     .compressed_size = compressed_size,
                 }},
@@ -200,13 +202,105 @@ const ZipfileDumper = struct {
     }
 
     fn dumpLocalFile(self: &Self, offset: u64, info: &const LocalFileInfo) -> %u64 {
-        // TODO
-        return 0;
+        var cursor = offset;
+        %return self.writeSectionHeader(offset, "Local File Header (#{})", info.entry_index);
+        var lfh_buffer: [30]u8 = undefined;
+        %return self.readNoEof(cursor, lfh_buffer[0..]);
+        if (readInt32(lfh_buffer, 0) != 0x04034b50) {
+            @panic("WARNING: signature mismatch");
+        }
+
+        var lfh_cursor: usize = 0;
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Local file header signature");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Version needed to extract (minimum)");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "General purpose bit flag");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Compression method");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File last modification time");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File last modification date");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "CRC-32");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Compressed size");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Uncompressed size");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File name length (n)");
+        %return self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Extra field length (m)");
+        cursor += lfh_cursor;
+
+        const file_name_length = readInt16(lfh_buffer, 26);
+        const extra_fields_length = readInt16(lfh_buffer, 28);
+
+        if (file_name_length > 0) {
+            %return self.writeSectionHeader(cursor, "File Name");
+            %return self.dumpBlobContents(cursor, file_name_length);
+            cursor += file_name_length;
+        }
+        if (extra_fields_length > 0) {
+            %return self.writeSectionHeader(cursor, "Extra Fields");
+            %return self.dumpBlobContents(cursor, extra_fields_length);
+            cursor += extra_fields_length;
+        }
+        if (info.compressed_size > 0) {
+            %return self.output.print("\n");
+            %return self.writeSectionHeader(cursor, "File Contents (#{})", info.entry_index);
+            %return self.dumpBlobContents(cursor, info.compressed_size);
+            cursor += info.compressed_size;
+        }
+
+        return cursor - offset;
     }
 
     fn dumpCentralDirectoryEntries(self: &Self, offset: u64, info: &const CentralDirectoryEntriesInfo) -> %u64 {
-        // TODO
-        return 0;
+        var cursor = offset;
+        {var i: u32 = 0; while (i < info.entry_count) : (i += 1) {
+            if (i > 0) %return self.output.print("\n");
+
+            %return self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
+            var cdr_buffer: [46]u8 = undefined;
+            %return self.readNoEof(cursor, cdr_buffer[0..]);
+            if (readInt32(cdr_buffer, 0) != 0x02014b50) {
+                @panic("WARNING: signature mismatch");
+            }
+
+            var cdr_cursor: usize = 0;
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version needed to extract (minimum)");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "General purpose bit flag");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Compression method");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification time");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification date");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "CRC-32");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Compressed size");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Uncompressed size");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File name length (n)");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Extra field length (m)");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File comment length (k)");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Disk number where file starts");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Internal file attributes");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "External file attributes");
+            %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
+            cursor += cdr_cursor;
+
+            const file_name_length = readInt16(cdr_buffer, 28);
+            const extra_fields_length = readInt16(cdr_buffer, 30);
+            const file_comment_length = readInt16(cdr_buffer, 32);
+
+            if (file_name_length > 0) {
+                %return self.writeSectionHeader(cursor, "File name");
+                %return self.dumpBlobContents(cursor, file_name_length);
+                cursor += file_name_length;
+            }
+            if (extra_fields_length > 0) {
+                %return self.writeSectionHeader(cursor, "Extra Fields");
+                %return self.dumpBlobContents(cursor, extra_fields_length);
+                cursor += extra_fields_length;
+            }
+            if (file_comment_length > 0) {
+                %return self.writeSectionHeader(cursor, "File Comment");
+                %return self.dumpBlobContents(cursor, file_comment_length);
+                cursor += file_comment_length;
+            }
+        }}
+
+        return cursor - offset;
     }
 
     fn dumpEndOfCentralDirectory(self: &Self, offset: u64, info: &const EndOfCentralDirectoryInfo) -> %u64 {
@@ -263,8 +357,10 @@ const ZipfileDumper = struct {
         }
     }
 
-    fn writeSectionHeader(self: &Self, offset: u64, name: []const u8) -> %void {
-        %return self.output.print(":0x{x16} ; {}\n", offset, name);
+    fn writeSectionHeader(self: &Self, offset: u64, comptime fmt: []const u8, args: ...) -> %void {
+        %return self.output.print(":0x{x16} ; ", offset);
+        %return self.output.print(fmt, args);
+        %return self.output.print("\n");
     }
 
     fn readStructField(self: &Self, buffer: []const u8, comptime max_size: usize, cursor: &usize,
