@@ -55,6 +55,11 @@ fn segmentLessThan(a: &const Segment, b: &const Segment) -> bool {
     return a.offset < b.offset;
 }
 
+const Encoding = enum {
+    None,
+    Cp437,
+    Utf8,
+};
 
 const eocdr_size = 22;
 const eocdr_search_size: u64 = 0xffff + eocdr_size;
@@ -192,7 +197,7 @@ const ZipfileDumper = struct {
 
             if (segment.offset > cursor) {
                 %return self.writeSectionHeader(cursor, "Unused space");
-                %return self.dumpBlobContents(cursor, segment.offset - cursor);
+                %return self.dumpBlobContents(cursor, segment.offset - cursor, Encoding.None);
                 %return self.output.print("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
@@ -233,27 +238,29 @@ const ZipfileDumper = struct {
         cursor += lfh_cursor;
 
         const file_name_length = readInt16(lfh_buffer, 26);
+        const general_purpose_bit_flag = readInt16(lfh_buffer, 6);
+        const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
         const extra_fields_length = readInt16(lfh_buffer, 28);
 
         if (file_name_length > 0) {
             self.indent(); defer self.outdent();
             %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "File Name");
-            %return self.dumpBlobContents(cursor, file_name_length);
+            %return self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
             self.indent(); defer self.outdent();
             %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "Extra Fields");
-            %return self.dumpBlobContents(cursor, extra_fields_length);
+            %return self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
             cursor += extra_fields_length;
         }
 
         if (info.compressed_size > 0) {
             %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "File Contents");
-            %return self.dumpBlobContents(cursor, info.compressed_size);
+            %return self.dumpBlobContents(cursor, info.compressed_size, Encoding.None);
             cursor += info.compressed_size;
         }
 
@@ -292,6 +299,8 @@ const ZipfileDumper = struct {
             %return self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
             cursor += cdr_cursor;
 
+            const general_purpose_bit_flag = readInt16(cdr_buffer, 8);
+            const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
             const file_name_length = readInt16(cdr_buffer, 28);
             const extra_fields_length = readInt16(cdr_buffer, 30);
             const file_comment_length = readInt16(cdr_buffer, 32);
@@ -299,19 +308,19 @@ const ZipfileDumper = struct {
             if (file_name_length > 0) {
                 self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "File name");
-                %return self.dumpBlobContents(cursor, file_name_length);
+                %return self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
                 cursor += file_name_length;
             }
             if (extra_fields_length > 0) {
                 self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "Extra Fields");
-                %return self.dumpBlobContents(cursor, extra_fields_length);
+                %return self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
                 cursor += extra_fields_length;
             }
             if (file_comment_length > 0) {
                 self.indent(); defer self.outdent();
                 %return self.writeSectionHeader(cursor, "File Comment");
-                %return self.dumpBlobContents(cursor, file_comment_length);
+                %return self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
                 cursor += file_comment_length;
             }
         }}
@@ -357,21 +366,65 @@ const ZipfileDumper = struct {
         return total_length;
     }
 
-    fn dumpBlobContents(self: &Self, offset: u64, length: u64) -> %void {
+    fn dumpBlobContents(self: &Self, offset: u64, length: u64, encoding: Encoding) -> %void {
         var buffer: [0x1000]u8 = undefined;
         const row_length = 16;
+
+        // the longest utf8 codepoint is 4 bytes long
+        var utf8_partial_codepoint_buffer: [3]u8 = undefined;
+        var utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..0];
 
         var cursor: u64 = 0;
         while (cursor < length) {
             const buffer_offset = offset + cursor;
             %return self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
             %return self.printIndentation();
+            const row_start = offset + cursor - buffer_offset;
             {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
                 %return self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
                 cursor += 1;
             }}
-            %return self.output.print("{x2}\n", buffer[offset + cursor - buffer_offset]);
+            %return self.output.print("{x2}", buffer[offset + cursor - buffer_offset]);
             cursor += 1;
+
+            var row = buffer[row_start..cursor];
+            switch (encoding) {
+                Encoding.None => {},
+                Encoding.Cp437 => {
+                    %return self.output.print(" ; ");
+                    for (row) |c| {
+                        %return self.output.write(cp437[c]);
+                    }
+                },
+                Encoding.Utf8 => {
+                    %return self.output.print(" ; ");
+                    // input is utf8; output is utf8.
+                    // the only challenge is grouping codepoints together in the output
+                    // Note that this does not check for invalid utf8 byte sequences.
+                    for (utf8_partial_codepoint) |c| {
+                        %return self.output.writeByte(c);
+                    }
+
+                    if (cursor < length and row[row.len - 1] & 0b10000000 != 0) {
+                        // if this is the final row, there's no point in saving any bytes.
+                        const partial_len =
+                                 if (row[row.len - 1] & 0b11000000 == 0b11000000) u2(1)
+                            else if (row[row.len - 2] & 0b11100000 == 0b11100000) u2(2)
+                            else if (row[row.len - 3] & 0b11110000 == 0b11110000) u2(3)
+                            else u2(0);
+                        utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..partial_len];
+                        {var i: u2 = 0; while (i < partial_len) : (i += 1) {
+                            utf8_partial_codepoint[i] = row[row.len - partial_len + i];
+                        }}
+                        row = row[0..row.len - partial_len];
+                    } else {
+                        utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..0];
+                    }
+
+                    %return self.output.write(row);
+                },
+            }
+            %return self.output.print("\n");
         }
     }
 
