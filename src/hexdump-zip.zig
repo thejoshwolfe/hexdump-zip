@@ -66,6 +66,7 @@ const ZipfileDumper = struct {
     input_file_stream: std.io.FileInStream,
     input: &std.io.InStream,
     file_size: u64,
+    offset_padding: usize,
     output_file: &std.io.File,
     output_file_stream: std.io.FileOutStream,
     buffered_output_stream: std.io.BufferedOutStream,
@@ -83,6 +84,11 @@ const ZipfileDumper = struct {
         self.file_size = u64(%return self.input_file.getEndPos()); // TODO: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
         // this limit eliminates most silly overflow checks on the file offset.
         if (self.file_size > 0x7fffffffffffffff) return error.FileTooBig;
+
+        {
+            var tmp: [16]u8 = undefined;
+            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, false, 0);
+        }
 
         self.output_file = output_file;
         self.output_file_stream = std.io.FileOutStream.init(self.output_file);
@@ -231,12 +237,14 @@ const ZipfileDumper = struct {
 
         if (file_name_length > 0) {
             self.indent(); defer self.outdent();
+            %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "File Name");
             %return self.dumpBlobContents(cursor, file_name_length);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
             self.indent(); defer self.outdent();
+            %return self.output.print("\n");
             %return self.writeSectionHeader(cursor, "Extra Fields");
             %return self.dumpBlobContents(cursor, extra_fields_length);
             cursor += extra_fields_length;
@@ -244,7 +252,7 @@ const ZipfileDumper = struct {
 
         if (info.compressed_size > 0) {
             %return self.output.print("\n");
-            %return self.writeSectionHeader(cursor, "File Contents (#{})", info.entry_index);
+            %return self.writeSectionHeader(cursor, "File Contents");
             %return self.dumpBlobContents(cursor, info.compressed_size);
             cursor += info.compressed_size;
         }
@@ -368,8 +376,11 @@ const ZipfileDumper = struct {
     }
 
     fn writeSectionHeader(self: &Self, offset: u64, comptime fmt: []const u8, args: ...) -> %void {
+        var offset_str_buf: [16]u8 = undefined;
+        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, self.offset_padding)];
+
         %return self.printIndentation();
-        %return self.output.print(":0x{x16} ; ", offset);
+        %return self.output.print(":0x{} ; ", offset_str);
         %return self.output.print(fmt, args);
         %return self.output.print("\n");
     }
