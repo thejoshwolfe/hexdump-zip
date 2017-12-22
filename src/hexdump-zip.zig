@@ -201,8 +201,8 @@ const ZipfileDumper = struct {
                 %return self.output.print("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
+                cursor = segment.offset;
                 @panic("TODO: overlapping regions");
-                //cursor = segment.offset;
             }
 
             const length = switch (segment.kind) {
@@ -333,12 +333,11 @@ const ZipfileDumper = struct {
         if (offset != info.eocdr_offset) {
             const zip64_eocdl_offset = info.eocdr_offset - 20;
             %return self.writeSectionHeader(offset, "Zip64 end of central directory record");
-            // TODO
 
             %return self.writeSectionHeader(zip64_eocdl_offset, "Zip64 end of central directory locator");
-            // TODO
 
             total_length = info.eocdr_offset - offset;
+            @panic("TODO");
         }
 
         %return self.writeSectionHeader(offset + total_length, "End of central directory record");
@@ -359,7 +358,7 @@ const ZipfileDumper = struct {
         if (comment_length > 0) {
             self.indent(); defer self.outdent();
             %return self.writeSectionHeader(offset + total_length, ".ZIP file comment");
-            // TODO: self.dumpCp437Blob(offset + total_length, comment_length);
+            %return self.dumpBlobContents(offset + total_length, comment_length, Encoding.Cp437);
             total_length += comment_length;
         }
 
@@ -483,9 +482,7 @@ const ZipfileDumper = struct {
                     name,
                 );
             },
-            8 => {
-                unreachable; // TODO
-            },
+            8 => @panic("TODO"),
             else => unreachable,
         }
         *cursor += size;
