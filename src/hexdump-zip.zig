@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const general_allocator = &std.heap.c_allocator;
+const general_allocator = std.heap.c_allocator;
 
 error Usage;
 fn usage() -> error {
@@ -60,6 +60,8 @@ const Encoding = enum {
     Cp437,
     Utf8,
 };
+
+const error_character = "\xef\xbf\xbd";
 
 const eocdr_size = 22;
 const eocdr_search_size: u64 = 0xffff + eocdr_size;
@@ -369,9 +371,9 @@ const ZipfileDumper = struct {
         var buffer: [0x1000]u8 = undefined;
         const row_length = 16;
 
-        // the longest utf8 codepoint is 4 bytes long
-        var utf8_partial_codepoint_buffer: [3]u8 = undefined;
-        var utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..0];
+        var utf8_byte_sequence_buffer: [4]u8 = undefined;
+        var utf8_bytes_saved: usize = 0;
+        var utf8_bytes_remaining: usize = 0;
 
         var cursor: u64 = 0;
         while (cursor < length) {
@@ -390,41 +392,84 @@ const ZipfileDumper = struct {
             switch (encoding) {
                 Encoding.None => {},
                 Encoding.Cp437 => {
-                    %return self.output.print(" ; ");
+                    %return self.output.print(" ; cp437\"");
                     for (row) |c| {
                         %return self.output.write(cp437[c]);
                     }
+                    %return self.output.print("\"");
                 },
                 Encoding.Utf8 => {
-                    %return self.output.print(" ; ");
                     // input is utf8; output is utf8.
-                    // the only challenge is grouping codepoints together in the output
-                    // Note that this does not check for invalid utf8 byte sequences.
-                    for (utf8_partial_codepoint) |c| {
-                        %return self.output.writeByte(c);
+                    %return self.output.print(" ; utf8\"");
+
+                    var i: usize = 0;
+                    if (utf8_bytes_remaining > 0) {
+                        while (i < utf8_bytes_remaining) : (i += 1) {
+                            utf8_byte_sequence_buffer[utf8_bytes_saved + i] = row[i];
+                        }
+                        %return self.dumpUtf8Codepoint(utf8_byte_sequence_buffer[0..utf8_bytes_saved + utf8_bytes_remaining]);
+                        utf8_bytes_saved = 0;
+                        utf8_bytes_remaining = 0;
                     }
 
-                    if (cursor < length and row[row.len - 1] & 0b10000000 != 0) {
-                        // if this is the final row, there's no point in saving any bytes.
-                        const partial_len =
-                                 if (row[row.len - 1] & 0b11000000 == 0b11000000) u2(1)
-                            else if (row[row.len - 2] & 0b11100000 == 0b11100000) u2(2)
-                            else if (row[row.len - 3] & 0b11110000 == 0b11110000) u2(3)
-                            else u2(0);
-                        utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..partial_len];
-                        {var i: u2 = 0; while (i < partial_len) : (i += 1) {
-                            utf8_partial_codepoint[i] = row[row.len - partial_len + i];
-                        }}
-                        row = row[0..row.len - partial_len];
-                    } else {
-                        utf8_partial_codepoint = utf8_partial_codepoint_buffer[0..0];
-                    }
+                    while (i < row.len) : (i += 1) {
+                        const utf8_length = std.unicode.utf8ByteSequenceLength(row[i]) %% {
+                            // invalid utf8 start byte. replace with the error character.
+                            %return self.output.write(error_character);
+                            continue;
+                        };
 
-                    %return self.output.write(row);
+                        if (i + utf8_length > row.len) {
+                            // this sequence wraps onto the next line.
+                            if (i + utf8_length - row.len > length - cursor) {
+                                // there is no next line. unexpected eof.
+                                %return self.output.write(error_character);
+                                break;
+                            }
+                            var j: usize = 0;
+                            while (j < row.len - i) : (j += 1) {
+                                utf8_byte_sequence_buffer[j] = row[i + j];
+                            }
+                            utf8_bytes_saved = j;
+                            utf8_bytes_remaining = utf8_length - j;
+                            break;
+                        }
+
+                        // we have a complete codepoint on this row
+                        %return self.dumpUtf8Codepoint(row[i..i + utf8_length]);
+                        i += utf8_length - 1;
+                    }
+                    %return self.output.print("\"");
                 },
             }
             %return self.output.print("\n");
         }
+    }
+
+    fn dumpUtf8Codepoint(self: &Self, byte_sequence: []const u8) -> %void {
+        const codepoint = std.unicode.utf8Decode(byte_sequence) %% {
+            // invalid utf8 seequcne becomes a single error character.
+            return self.output.write(error_character);
+        };
+        // some special escapes
+        switch (codepoint) {
+            '\n' => return self.output.write("\\n"),
+            '\r' => return self.output.write("\\r"),
+            '\t' => return self.output.write("\\t"),
+            '"'  => return self.output.write("\\\""),
+            '\\' => return self.output.write("\\\\"),
+            else => {},
+        }
+        // numeric escapes
+        switch (codepoint) {
+            // ascii control codes
+            0...0x1f, 0x7f => return self.output.print("\\x{x2}", codepoint),
+            // unicode newline characters
+            0x805, 0x2028, 0x2029 => return self.output.print("\\u{x4}", codepoint),
+            else => {},
+        }
+        // literal character
+        return self.output.write(byte_sequence);
     }
 
     fn writeSectionHeader(self: &Self, offset: u64, comptime fmt: []const u8, args: ...) -> %void {
