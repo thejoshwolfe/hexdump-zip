@@ -218,13 +218,17 @@ const ZipfileDumper = struct {
 
     fn dumpLocalFile(self: &Self, offset: u64, info: &const LocalFileInfo) -> %u64 {
         var cursor = offset;
-        try self.writeSectionHeader(offset, "Local File Header (#{})", info.entry_index);
         var lfh_buffer: [30]u8 = undefined;
         try self.readNoEof(cursor, lfh_buffer[0..]);
         if (readInt32(lfh_buffer, 0) != 0x04034b50) {
-            @panic("WARNING: signature mismatch");
+            try self.writeSectionHeader(offset, "WARNING: invalid local file header signature");
+            try self.output.print("\n");
+            // if this isn't a local file, idk what it is.
+            // call it unknown
+            return 0;
         }
 
+        try self.writeSectionHeader(offset, "Local File Header (#{})", info.entry_index);
         var lfh_cursor: usize = 0;
         try self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Local file header signature");
         try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Version needed to extract (minimum)");
@@ -266,6 +270,24 @@ const ZipfileDumper = struct {
             cursor += info.compressed_size;
         }
 
+        // check for the optional data descriptor
+        var data_descriptor_buffer: [16]u8 = undefined;
+        if (self.readNoEof(cursor, data_descriptor_buffer[0..])) {
+            if (readInt32(data_descriptor_buffer, 0) == 0x08074b50) {
+                // this is a data descriptor
+                try self.output.print("\n");
+                try self.writeSectionHeader(cursor, "Optional Data Descriptor");
+                var data_descriptor_cursor: usize = 0;
+                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
+                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
+                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
+                cursor += data_descriptor_cursor;
+            }
+        } else |err| {
+            // ok, so there's no optional data descriptor here
+        }
+
         return cursor - offset;
     }
 
@@ -274,13 +296,15 @@ const ZipfileDumper = struct {
         {var i: u32 = 0; while (i < info.entry_count) : (i += 1) {
             if (i > 0) try self.output.print("\n");
 
-            try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
             var cdr_buffer: [46]u8 = undefined;
             try self.readNoEof(cursor, cdr_buffer[0..]);
             if (readInt32(cdr_buffer, 0) != 0x02014b50) {
-                @panic("WARNING: signature mismatch");
+                try self.writeSectionHeader(cursor, "WARNING: invalid central file header signature");
+                try self.output.print("\n");
+                return 0;
             }
 
+            try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
             var cdr_cursor: usize = 0;
             try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
             try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
@@ -388,10 +412,16 @@ const ZipfileDumper = struct {
             try self.output.print("{x2}", buffer[offset + cursor - buffer_offset]);
             cursor += 1;
 
-            var row = buffer[row_start..cursor];
+            var row = buffer[row_start..offset + cursor - buffer_offset];
             switch (encoding) {
                 Encoding.None => {},
                 Encoding.Cp437 => {
+                    if (length > row_length) {
+                        var i: usize = row.len;
+                        while (i < row_length) : (i += 1) {
+                            try self.output.print("   ");
+                        }
+                    }
                     try self.output.print(" ; cp437\"");
                     for (row) |c| {
                         try self.output.write(cp437[c]);
@@ -399,9 +429,15 @@ const ZipfileDumper = struct {
                     try self.output.print("\"");
                 },
                 Encoding.Utf8 => {
-                    // input is utf8; output is utf8.
+                    if (length > row_length) {
+                        var i: usize = row.len;
+                        while (i < row_length) : (i += 1) {
+                            try self.output.print("   ");
+                        }
+                    }
                     try self.output.print(" ; utf8\"");
 
+                    // input is utf8; output is utf8.
                     var i: usize = 0;
                     if (utf8_bytes_remaining > 0) {
                         while (i < utf8_bytes_remaining) : (i += 1) {
