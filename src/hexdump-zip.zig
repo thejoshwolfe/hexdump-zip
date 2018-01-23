@@ -11,6 +11,7 @@ fn usage() -> error {
 error NotAZipFile;
 error FileTooBig;
 error MultiDiskZipfileNotSupported;
+error SizeOfCentralDirectoryOverflow;
 
 pub fn main() -> %void {
     var args = std.os.args();
@@ -133,21 +134,30 @@ const ZipfileDumper = struct {
         }
         const eocdr_offset = self.file_size - comment_length - eocdr_size;
 
-        const signature = readInt32(eocdr_buffer, 0);
-        if (signature != 0x06054b50) return error.NotAZipFile;
+        const disk_number = readInt16(eocdr_buffer, 4);
+        if (disk_number != 0) return error.MultiDiskZipfileNotSupported;
+
+        var entry_count: u32 = readInt16(eocdr_buffer, 10);
+        var size_of_central_directory: u64 = readInt32(eocdr_buffer, 12);
+        var central_directory_offset: u64 = readInt32(eocdr_buffer, 16);
+
+        // TODO: check for ZIP64 format
+
+        // check for bogus Mac Archive Utility "format"
+        if (eocdr_offset < size_of_central_directory) return error.SizeOfCentralDirectoryOverflow;
+        var calculated_central_directory_offset = eocdr_offset - size_of_central_directory;
+        if (calculated_central_directory_offset != central_directory_offset and
+            calculated_central_directory_offset & 0xffffffff == central_directory_offset) {
+            // god damnit.
+            @panic("god damnit");
+        }
+
         try self.segments.append(Segment{
             .offset = eocdr_offset,
             .kind = SegmentKind{.EndOfCentralDirectory = EndOfCentralDirectoryInfo{
                 .eocdr_offset = eocdr_offset,
             }},
         });
-
-        const disk_number = readInt16(eocdr_buffer, 4);
-        if (disk_number != 0) return error.MultiDiskZipfileNotSupported;
-
-        var entry_count: u32 = readInt16(eocdr_buffer, 10);
-        var central_directory_offset: u64 = readInt32(eocdr_buffer, 16);
-        // TODO: check for ZIP64 format
 
         if (entry_count > 0) {
             try self.segments.append(Segment{
