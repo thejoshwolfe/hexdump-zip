@@ -183,134 +183,134 @@ const ZipfileDumper = struct {
 
 
         var central_directory_cursor: u64 = central_directory_offset;
-        {var entry_index: u32 = 0; while (entry_index < entry_count) : (entry_index += 1) {
-            var cfh_buffer: [46]u8 = undefined;
-            try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
+            {var entry_index: u32 = 0; while (entry_index < entry_count) : (entry_index += 1) {
+                var cfh_buffer: [46]u8 = undefined;
+                try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
 
-            var compressed_size: u64 = readInt32(cfh_buffer, 20);
-            const file_name_length = readInt16(cfh_buffer, 28);
-            const extra_fields_length = readInt16(cfh_buffer, 30);
-            const file_comment_length = readInt16(cfh_buffer, 32);
-            var local_header_offset: u64 = readInt32(cfh_buffer, 42);
+                var compressed_size: u64 = readInt32(cfh_buffer, 20);
+                const file_name_length = readInt16(cfh_buffer, 28);
+                const extra_fields_length = readInt16(cfh_buffer, 30);
+                const file_comment_length = readInt16(cfh_buffer, 32);
+                var local_header_offset: u64 = readInt32(cfh_buffer, 42);
 
-            // TODO: check for ZIP64 format
-            var is_zip64 = false;
+                // TODO: check for ZIP64 format
+                var is_zip64 = false;
 
-            central_directory_cursor += 46;
-            central_directory_cursor += file_name_length;
-            central_directory_cursor += extra_fields_length;
-            central_directory_cursor += file_comment_length;
+                central_directory_cursor += 46;
+                central_directory_cursor += file_name_length;
+                central_directory_cursor += extra_fields_length;
+                central_directory_cursor += file_comment_length;
 
-            // check mac stuff
-            if (self.mac_archive_utility_overflow_recovery_cursor) |*mac_archive_utility_overflow_recovery_cursor| mac_stuff: {
-                // There might be something fishy going on with overflow.
-                // Check if the local header is really where it's supposed to be.
-                if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff) {
-                    // Non-contiguous entries. This is definitely not a mac zip.
-                    self.mac_archive_utility_overflow_recovery_cursor = null;
-                    break :mac_stuff;
-                }
-                if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.*) {
-                    // this really looks like corruption.
-                    // peek and see if there's a signature where we suspect.
-                    if (self.isSignatureAt(mac_archive_utility_overflow_recovery_cursor.*, lfh_signature)) {
-                        // ok *maybe* this is a coincidence, but it really looks like corruption.
-                        self.detectedMauCorruption("relative offset of local header");
-                        local_header_offset = mac_archive_utility_overflow_recovery_cursor.*;
+                // check mac stuff
+                if (self.mac_archive_utility_overflow_recovery_cursor) |*mac_archive_utility_overflow_recovery_cursor| mac_stuff: {
+                    // There might be something fishy going on with overflow.
+                    // Check if the local header is really where it's supposed to be.
+                    if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff) {
+                        // Non-contiguous entries. This is definitely not a mac zip.
+                        self.mac_archive_utility_overflow_recovery_cursor = null;
+                        break :mac_stuff;
                     }
-                }
-                // ok. we've found the local file header.
+                    if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.*) {
+                        // this really looks like corruption.
+                        // peek and see if there's a signature where we suspect.
+                        if (self.isSignatureAt(mac_archive_utility_overflow_recovery_cursor.*, lfh_signature)) {
+                            // ok *maybe* this is a coincidence, but it really looks like corruption.
+                            self.detectedMauCorruption("relative offset of local header");
+                            local_header_offset = mac_archive_utility_overflow_recovery_cursor.*;
+                        }
+                    }
+                    // ok. we've found the local file header.
 
-                // now what's the compressed size really?
+                    // now what's the compressed size really?
 
-                // peek at the local file header's fields
-                var lfh_buffer: [30]u8 = undefined;
-                try self.readNoEof(local_header_offset, lfh_buffer[0..]);
-                const local_file_name_length = readInt16(lfh_buffer, 26);
-                const local_extra_fields_length = readInt16(lfh_buffer, 28);
-                mac_archive_utility_overflow_recovery_cursor.* += 30;
-                mac_archive_utility_overflow_recovery_cursor.* += local_file_name_length;
-                mac_archive_utility_overflow_recovery_cursor.* += local_extra_fields_length;
-                mac_archive_utility_overflow_recovery_cursor.* += compressed_size;
-                // allegedly the cursor is now pointing to the end of the data
+                    // peek at the local file header's fields
+                    var lfh_buffer: [30]u8 = undefined;
+                    try self.readNoEof(local_header_offset, lfh_buffer[0..]);
+                    const local_file_name_length = readInt16(lfh_buffer, 26);
+                    const local_extra_fields_length = readInt16(lfh_buffer, 28);
+                    mac_archive_utility_overflow_recovery_cursor.* += 30;
+                    mac_archive_utility_overflow_recovery_cursor.* += local_file_name_length;
+                    mac_archive_utility_overflow_recovery_cursor.* += local_extra_fields_length;
+                    mac_archive_utility_overflow_recovery_cursor.* += compressed_size;
+                    // allegedly the cursor is now pointing to the end of the data
 
-                var next_thing_start_offset = next_thing_start_offset: {
-                    if (entry_index == entry_count - 1) {
-                        // Supposedly this is the last entry.
-                        if (central_directory_cursor < eocdr_offset) {
-                            // There's apparently unused space in the central directory.
-                            // I wonder if there's actually more entries here.
-                            if (self.isSignatureAt(central_directory_cursor, cfh_signature)) {
-                                // Yep. There's more entries.
-                                self.detectedMauCorruption("total number of entries in the central directory");
-                                entry_count += 0x10000;
+                    var next_thing_start_offset = next_thing_start_offset: {
+                        if (entry_index == entry_count - 1) {
+                            // Supposedly this is the last entry.
+                            if (central_directory_cursor < eocdr_offset) {
+                                // There's apparently unused space in the central directory.
+                                // I wonder if there's actually more entries here.
+                                if (self.isSignatureAt(central_directory_cursor, cfh_signature)) {
+                                    // Yep. There's more entries.
+                                    self.detectedMauCorruption("total number of entries in the central directory");
+                                    entry_count += 0x10000;
+                                }
                             }
                         }
-                    }
-                    if (entry_index == entry_count - 1) {
-                        // This is the last entry.
-                        break :next_thing_start_offset central_directory_offset;
-                    }
-                    // This is not the last entry.
-                    // Read the relative offset of local header for the *next* entry.
-                    // Note that this value itself might be affected by overflow corruption.
-                    break :next_thing_start_offset self.readInt32At(central_directory_cursor + 42) catch {
-                        // There're not enough entries in here.
-                        // This will be an error elsewhere.
-                        self.mac_archive_utility_overflow_recovery_cursor = null;
-                        break :mac_stuff;
-                    };
-                };
-
-                // Mac Archive Utility sometimes includes a 16-byte data descriptor,
-                // and then the next thing starts immediately afterward.
-                const distance_to_next_thing = (next_thing_start_offset & 0xffffffff) -% (mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff);
-                const expect_oddo = if (distance_to_next_thing == 0) false
-                        else if (distance_to_next_thing == 16) true else {
-                    // This is not the work of the Mac Archive Utility.
-                    self.mac_archive_utility_overflow_recovery_cursor = null;
-                    break :mac_stuff;
-                };
-
-                // We're reasonably certain we're dealing with mac archive utility.
-                // Go searching for the signature of the next thing to find the end of this thing.
-                while (true) {
-                    const possible_signature = self.readInt32At(mac_archive_utility_overflow_recovery_cursor.*) catch {
-                        // Didn't find the signature?
-                        // I guess this isn't a Mac Archive Utility zip file.
-                        self.mac_archive_utility_overflow_recovery_cursor = null;
-                        break :mac_stuff;
-                    };
-                    if (possible_signature == if (expect_oddo) oddo_signature
-                            else if (entry_index == entry_count - 1) cfh_signature else u32(lfh_signature)) {
-                        // This is *probably* the end of the file contents.
-                        // Or maybe this signature just happens to show up in the file contents.
-                        // It's impossible to avoid ambiguities like this when trying to recover from the corruption,
-                        // so let's just charge ahead with our heuristic.
-                        if (expect_oddo) {
-                            mac_archive_utility_overflow_recovery_cursor.* += 16;
+                        if (entry_index == entry_count - 1) {
+                            // This is the last entry.
+                            break :next_thing_start_offset central_directory_offset;
                         }
-                        break;
+                        // This is not the last entry.
+                        // Read the relative offset of local header for the *next* entry.
+                        // Note that this value itself might be affected by overflow corruption.
+                        break :next_thing_start_offset self.readInt32At(central_directory_cursor + 42) catch {
+                            // There're not enough entries in here.
+                            // This will be an error elsewhere.
+                            self.mac_archive_utility_overflow_recovery_cursor = null;
+                            break :mac_stuff;
+                        };
+                    };
+
+                    // Mac Archive Utility sometimes includes a 16-byte data descriptor,
+                    // and then the next thing starts immediately afterward.
+                    const distance_to_next_thing = (next_thing_start_offset & 0xffffffff) -% (mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff);
+                    const expect_oddo = if (distance_to_next_thing == 0) false
+                            else if (distance_to_next_thing == 16) true else {
+                        // This is not the work of the Mac Archive Utility.
+                        self.mac_archive_utility_overflow_recovery_cursor = null;
+                        break :mac_stuff;
+                    };
+
+                    // We're reasonably certain we're dealing with mac archive utility.
+                    // Go searching for the signature of the next thing to find the end of this thing.
+                    while (true) {
+                        const possible_signature = self.readInt32At(mac_archive_utility_overflow_recovery_cursor.*) catch {
+                            // Didn't find the signature?
+                            // I guess this isn't a Mac Archive Utility zip file.
+                            self.mac_archive_utility_overflow_recovery_cursor = null;
+                            break :mac_stuff;
+                        };
+                        if (possible_signature == if (expect_oddo) oddo_signature
+                                else if (entry_index == entry_count - 1) cfh_signature else u32(lfh_signature)) {
+                            // This is *probably* the end of the file contents.
+                            // Or maybe this signature just happens to show up in the file contents.
+                            // It's impossible to avoid ambiguities like this when trying to recover from the corruption,
+                            // so let's just charge ahead with our heuristic.
+                            if (expect_oddo) {
+                                mac_archive_utility_overflow_recovery_cursor.* += 16;
+                            }
+                            break;
+                        }
+                        // Assume we're dealing with overflow.
+                        mac_archive_utility_overflow_recovery_cursor.* += 0x100000000;
+                        compressed_size += 0x100000000;
                     }
-                    // Assume we're dealing with overflow.
-                    mac_archive_utility_overflow_recovery_cursor.* += 0x100000000;
-                    compressed_size += 0x100000000;
+
+                    if (compressed_size > 0xffffffff) {
+                        self.detectedMauCorruption("compressed size");
+                    }
                 }
 
-                if (compressed_size > 0xffffffff) {
-                    self.detectedMauCorruption("compressed size");
-                }
-            }
-
-            try self.segments.append(Segment{
-                .offset = local_header_offset,
-                .kind = SegmentKind{.LocalFile = LocalFileInfo{
-                    .entry_index = entry_index,
-                    .is_zip64 = false,
-                    .compressed_size = compressed_size,
-                }},
-            });
-        }}
+                try self.segments.append(Segment{
+                    .offset = local_header_offset,
+                    .kind = SegmentKind{.LocalFile = LocalFileInfo{
+                        .entry_index = entry_index,
+                        .is_zip64 = false,
+                        .compressed_size = compressed_size,
+                    }},
+                });
+            }}
 
         if (entry_count > 0) {
             try self.segments.append(Segment{
@@ -434,63 +434,63 @@ const ZipfileDumper = struct {
 
     fn dumpCentralDirectoryEntries(self: &Self, offset: u64, info: &const CentralDirectoryEntriesInfo) !u64 {
         var cursor = offset;
-        {var i: u32 = 0; while (i < info.entry_count) : (i += 1) {
-            if (i > 0) try self.output.print("\n");
+            {var i: u32 = 0; while (i < info.entry_count) : (i += 1) {
+                if (i > 0) try self.output.print("\n");
 
-            var cdr_buffer: [46]u8 = undefined;
-            try self.readNoEof(cursor, cdr_buffer[0..]);
-            if (readInt32(cdr_buffer, 0) != cfh_signature) {
-                try self.writeSectionHeader(cursor, "WARNING: invalid central file header signature");
-                try self.output.print("\n");
-                return 0;
-            }
+                var cdr_buffer: [46]u8 = undefined;
+                try self.readNoEof(cursor, cdr_buffer[0..]);
+                if (readInt32(cdr_buffer, 0) != cfh_signature) {
+                    try self.writeSectionHeader(cursor, "WARNING: invalid central file header signature");
+                    try self.output.print("\n");
+                    return 0;
+                }
 
-            try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
-            var cdr_cursor: usize = 0;
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version needed to extract (minimum)");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "General purpose bit flag");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Compression method");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification time");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification date");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "CRC-32");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Compressed size");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Uncompressed size");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File name length (n)");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Extra field length (m)");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File comment length (k)");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Disk number where file starts");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Internal file attributes");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "External file attributes");
-            try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
-            cursor += cdr_cursor;
+                try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
+                var cdr_cursor: usize = 0;
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version needed to extract (minimum)");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "General purpose bit flag");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Compression method");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification time");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification date");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "CRC-32");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Compressed size");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Uncompressed size");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File name length (n)");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Extra field length (m)");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File comment length (k)");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Disk number where file starts");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Internal file attributes");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "External file attributes");
+                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
+                cursor += cdr_cursor;
 
-            const general_purpose_bit_flag = readInt16(cdr_buffer, 8);
-            const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
-            const file_name_length = readInt16(cdr_buffer, 28);
-            const extra_fields_length = readInt16(cdr_buffer, 30);
-            const file_comment_length = readInt16(cdr_buffer, 32);
+                const general_purpose_bit_flag = readInt16(cdr_buffer, 8);
+                const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
+                const file_name_length = readInt16(cdr_buffer, 28);
+                const extra_fields_length = readInt16(cdr_buffer, 30);
+                const file_comment_length = readInt16(cdr_buffer, 32);
 
-            if (file_name_length > 0) {
-                self.indent(); defer self.outdent();
-                try self.writeSectionHeader(cursor, "File name");
-                try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
-                cursor += file_name_length;
-            }
-            if (extra_fields_length > 0) {
-                self.indent(); defer self.outdent();
-                try self.writeSectionHeader(cursor, "Extra Fields");
-                try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
-                cursor += extra_fields_length;
-            }
-            if (file_comment_length > 0) {
-                self.indent(); defer self.outdent();
-                try self.writeSectionHeader(cursor, "File Comment");
-                try self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
-                cursor += file_comment_length;
-            }
-        }}
+                if (file_name_length > 0) {
+                    self.indent(); defer self.outdent();
+                    try self.writeSectionHeader(cursor, "File name");
+                    try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
+                    cursor += file_name_length;
+                }
+                if (extra_fields_length > 0) {
+                    self.indent(); defer self.outdent();
+                    try self.writeSectionHeader(cursor, "Extra Fields");
+                    try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
+                    cursor += extra_fields_length;
+                }
+                if (file_comment_length > 0) {
+                    self.indent(); defer self.outdent();
+                    try self.writeSectionHeader(cursor, "File Comment");
+                    try self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
+                    cursor += file_comment_length;
+                }
+            }}
 
         return cursor - offset;
     }
@@ -546,10 +546,10 @@ const ZipfileDumper = struct {
             try self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
             try self.printIndentation();
             const row_start = offset + cursor - buffer_offset;
-            {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
-                try self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
-                cursor += 1;
-            }}
+                {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
+                    try self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
+                    cursor += 1;
+                }}
             try self.output.print("{x2}", buffer[offset + cursor - buffer_offset]);
             cursor += 1;
 
@@ -721,9 +721,9 @@ const ZipfileDumper = struct {
         self.indentation -= 1;
     }
     fn printIndentation(self: &Self) !void {
-        {var i: u2 = 0; while (i < self.indentation) : (i += 1) {
-            try self.output.print("  ");
-        }}
+            {var i: u2 = 0; while (i < self.indentation) : (i += 1) {
+                try self.output.print("  ");
+            }}
     }
 
     fn readNoEof(self: &Self, offset: u64, buffer: []u8) !void {
