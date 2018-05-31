@@ -205,18 +205,18 @@ const ZipfileDumper = struct {
             if (self.mac_archive_utility_overflow_recovery_cursor) |*mac_archive_utility_overflow_recovery_cursor| mac_stuff: {
                 // There might be something fishy going on with overflow.
                 // Check if the local header is really where it's supposed to be.
-                if (local_header_offset != *mac_archive_utility_overflow_recovery_cursor & 0xffffffff) {
+                if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff) {
                     // Non-contiguous entries. This is definitely not a mac zip.
                     self.mac_archive_utility_overflow_recovery_cursor = null;
                     break :mac_stuff;
                 }
-                if (local_header_offset != *mac_archive_utility_overflow_recovery_cursor) {
+                if (local_header_offset != mac_archive_utility_overflow_recovery_cursor.*) {
                     // this really looks like corruption.
                     // peek and see if there's a signature where we suspect.
-                    if (self.isSignatureAt(*mac_archive_utility_overflow_recovery_cursor, lfh_signature)) {
+                    if (self.isSignatureAt(mac_archive_utility_overflow_recovery_cursor.*, lfh_signature)) {
                         // ok *maybe* this is a coincidence, but it really looks like corruption.
                         self.detectedMauCorruption("relative offset of local header");
-                        local_header_offset = *mac_archive_utility_overflow_recovery_cursor;
+                        local_header_offset = mac_archive_utility_overflow_recovery_cursor.*;
                     }
                 }
                 // ok. we've found the local file header.
@@ -228,10 +228,10 @@ const ZipfileDumper = struct {
                 try self.readNoEof(local_header_offset, lfh_buffer[0..]);
                 const local_file_name_length = readInt16(lfh_buffer, 26);
                 const local_extra_fields_length = readInt16(lfh_buffer, 28);
-                *mac_archive_utility_overflow_recovery_cursor += 30;
-                *mac_archive_utility_overflow_recovery_cursor += local_file_name_length;
-                *mac_archive_utility_overflow_recovery_cursor += local_extra_fields_length;
-                *mac_archive_utility_overflow_recovery_cursor += compressed_size;
+                mac_archive_utility_overflow_recovery_cursor.* += 30;
+                mac_archive_utility_overflow_recovery_cursor.* += local_file_name_length;
+                mac_archive_utility_overflow_recovery_cursor.* += local_extra_fields_length;
+                mac_archive_utility_overflow_recovery_cursor.* += compressed_size;
                 // allegedly the cursor is now pointing to the end of the data
 
                 var next_thing_start_offset = next_thing_start_offset: {
@@ -264,7 +264,7 @@ const ZipfileDumper = struct {
 
                 // Mac Archive Utility sometimes includes a 16-byte data descriptor,
                 // and then the next thing starts immediately afterward.
-                const distance_to_next_thing = (next_thing_start_offset & 0xffffffff) -% (*mac_archive_utility_overflow_recovery_cursor & 0xffffffff);
+                const distance_to_next_thing = (next_thing_start_offset & 0xffffffff) -% (mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff);
                 const expect_oddo = if (distance_to_next_thing == 0) false
                         else if (distance_to_next_thing == 16) true else {
                     // This is not the work of the Mac Archive Utility.
@@ -275,7 +275,7 @@ const ZipfileDumper = struct {
                 // We're reasonably certain we're dealing with mac archive utility.
                 // Go searching for the signature of the next thing to find the end of this thing.
                 while (true) {
-                    const possible_signature = self.readInt32At(*mac_archive_utility_overflow_recovery_cursor) catch {
+                    const possible_signature = self.readInt32At(mac_archive_utility_overflow_recovery_cursor.*) catch {
                         // Didn't find the signature?
                         // I guess this isn't a Mac Archive Utility zip file.
                         self.mac_archive_utility_overflow_recovery_cursor = null;
@@ -288,12 +288,12 @@ const ZipfileDumper = struct {
                         // It's impossible to avoid ambiguities like this when trying to recover from the corruption,
                         // so let's just charge ahead with our heuristic.
                         if (expect_oddo) {
-                            *mac_archive_utility_overflow_recovery_cursor += 16;
+                            mac_archive_utility_overflow_recovery_cursor.* += 16;
                         }
                         break;
                     }
                     // Assume we're dealing with overflow.
-                    *mac_archive_utility_overflow_recovery_cursor += 0x100000000;
+                    mac_archive_utility_overflow_recovery_cursor.* += 0x100000000;
                     compressed_size += 0x100000000;
                 }
 
@@ -673,7 +673,7 @@ const ZipfileDumper = struct {
         try self.printIndentation();
         switch (size) {
             2 => {
-                var value = readInt16(buffer, *cursor);
+                var value = readInt16(buffer, cursor.*);
                 try self.output.print(
                     "{x2} {x2}" ++ ("   " ** (max_size - size)) ++
                     " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
@@ -681,15 +681,15 @@ const ZipfileDumper = struct {
                     " ; 0x{x4}" ++ ("  " ** (max_size - size)) ++
                     " ; {}" ++
                     "\n",
-                    buffer[*cursor + 0], buffer[*cursor + 1],
-                    cp437[buffer[*cursor + 0]], cp437[buffer[*cursor + 1]],
+                    buffer[cursor.* + 0], buffer[cursor.* + 1],
+                    cp437[buffer[cursor.* + 0]], cp437[buffer[cursor.* + 1]],
                     value,
                     value,
                     name,
                 );
             },
             4 => {
-                var value = readInt32(buffer, *cursor);
+                var value = readInt32(buffer, cursor.*);
                 try self.output.print(
                     "{x2} {x2} {x2} {x2}" ++ ("   " ** (max_size - size)) ++
                     " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
@@ -697,8 +697,8 @@ const ZipfileDumper = struct {
                     " ; 0x{x8}" ++ ("  " ** (max_size - size)) ++
                     " ; {}" ++
                     "\n",
-                    buffer[*cursor + 0], buffer[*cursor + 1], buffer[*cursor + 2], buffer[*cursor + 3],
-                    cp437[buffer[*cursor + 0]], cp437[buffer[*cursor + 1]], cp437[buffer[*cursor + 2]], cp437[buffer[*cursor + 3]],
+                    buffer[cursor.* + 0], buffer[cursor.* + 1], buffer[cursor.* + 2], buffer[cursor.* + 3],
+                    cp437[buffer[cursor.* + 0]], cp437[buffer[cursor.* + 1]], cp437[buffer[cursor.* + 2]], cp437[buffer[cursor.* + 3]],
                     value,
                     value,
                     name,
@@ -707,7 +707,7 @@ const ZipfileDumper = struct {
             8 => @panic("TODO"),
             else => unreachable,
         }
-        *cursor += size;
+        cursor.* += size;
     }
 
     fn detectedMauCorruption(self: &Self, field_name: []const u8) void {
