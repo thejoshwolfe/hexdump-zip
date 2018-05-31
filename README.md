@@ -1,4 +1,5 @@
 # hexdump-zip
+
 produce an annotated hexdump of a zipfile
 
 ## Build
@@ -6,14 +7,27 @@ produce an annotated hexdump of a zipfile
 Install [zig](http://ziglang.org/).
 
 ```
-$ mkdir build && cd build
-$ zig build-exe --library c ../src/hexdump-zip.zig
+$ zig build
 ```
 
-Executable binary is at `build/hexdump-zip`.
+Executable binary is at `zig-cache/hexdump-zip`.
 
 ## Run
 
 ```
 hexdump-zip INPUT.zip OUTPUT.hex
+```
+
+## Test
+
+This project uses git submodules:
+
+```
+$ git submodule update --init --recursive
+```
+
+Then:
+
+```
+$ zig build test
 ```

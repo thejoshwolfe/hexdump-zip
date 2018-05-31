@@ -1,0 +1,3 @@
+[submodule "deps/hex2bin"]
+	path = deps/hex2bin
+	url = https://github.com/thejoshwolfe/hex2bin
