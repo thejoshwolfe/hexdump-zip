@@ -63,10 +63,13 @@ const eocdr_search_size: u64 = 0xffff + eocdr_size;
 
 /// end of central dir signature
 const eocdr_signature = 0x06054b50;
+
 /// central file header signature
 const cfh_signature = 0x02014b50;
+
 /// local file header signature
 const lfh_signature = 0x04034b50;
+
 /// optional data descriptor optional signature
 const oddo_signature = 0x08074b50;
 
@@ -89,7 +92,6 @@ const ZipfileDumper = struct {
 
     pub fn init(self: &Self, input_file: &std.os.File, output_file: &std.os.File, allocator: &std.mem.Allocator) !void {
         // FIXME: return a new object once we have https://github.com/zig-lang/zig/issues/287
-
         self.input_file = input_file;
         self.input_file_stream = std.io.FileInStream.init(self.input_file);
         self.input = &self.input_file_stream.stream;
@@ -132,7 +134,7 @@ const ZipfileDumper = struct {
             var cursor = eocdr_search_slice.len - comment_length - eocdr_size;
             if (readInt32(eocdr_search_slice, cursor) == eocdr_signature) {
                 // found it
-                eocdr_buffer = eocdr_search_slice[cursor..cursor + eocdr_size];
+                eocdr_buffer = eocdr_search_slice[cursor .. cursor + eocdr_size];
                 break;
             }
             if (cursor == 0) return error.NotAZipFile;
@@ -151,7 +153,7 @@ const ZipfileDumper = struct {
         // check for Mac Archive Utility corruption in the central directory location and size
         if (eocdr_offset > 0xffffffff) {
             var calculated_central_directory_offset = std.math.sub(u64, eocdr_offset, size_of_central_directory) catch return error.SizeOfCentralDirectoryOverflow;
-            if (central_directory_offset != calculated_central_directory_offset and 
+            if (central_directory_offset != calculated_central_directory_offset and
                 central_directory_offset == calculated_central_directory_offset & 0xffffffff)
             {
                 // Uh oh.
@@ -181,9 +183,10 @@ const ZipfileDumper = struct {
             }
         }
 
-
         var central_directory_cursor: u64 = central_directory_offset;
-            {var entry_index: u32 = 0; while (entry_index < entry_count) : (entry_index += 1) {
+        {
+            var entry_index: u32 = 0;
+            while (entry_index < entry_count) : (entry_index += 1) {
                 var cfh_buffer: [46]u8 = undefined;
                 try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
 
@@ -265,8 +268,7 @@ const ZipfileDumper = struct {
                     // Mac Archive Utility sometimes includes a 16-byte data descriptor,
                     // and then the next thing starts immediately afterward.
                     const distance_to_next_thing = (next_thing_start_offset & 0xffffffff) -% (mac_archive_utility_overflow_recovery_cursor.* & 0xffffffff);
-                    const expect_oddo = if (distance_to_next_thing == 0) false
-                            else if (distance_to_next_thing == 16) true else {
+                    const expect_oddo = if (distance_to_next_thing == 0) false else if (distance_to_next_thing == 16) true else {
                         // This is not the work of the Mac Archive Utility.
                         self.mac_archive_utility_overflow_recovery_cursor = null;
                         break :mac_stuff;
@@ -281,8 +283,7 @@ const ZipfileDumper = struct {
                             self.mac_archive_utility_overflow_recovery_cursor = null;
                             break :mac_stuff;
                         };
-                        if (possible_signature == if (expect_oddo) oddo_signature
-                                else if (entry_index == entry_count - 1) cfh_signature else u32(lfh_signature)) {
+                        if (possible_signature == if (expect_oddo) oddo_signature else if (entry_index == entry_count - 1) cfh_signature else u32(lfh_signature)) {
                             // This is *probably* the end of the file contents.
                             // Or maybe this signature just happens to show up in the file contents.
                             // It's impossible to avoid ambiguities like this when trying to recover from the corruption,
@@ -304,28 +305,31 @@ const ZipfileDumper = struct {
 
                 try self.segments.append(Segment{
                     .offset = local_header_offset,
-                    .kind = SegmentKind{.LocalFile = LocalFileInfo{
-                        .entry_index = entry_index,
-                        .is_zip64 = false,
-                        .compressed_size = compressed_size,
-                    }},
+                    .kind = SegmentKind{
+                        .LocalFile = LocalFileInfo{
+                            .entry_index = entry_index,
+                            .is_zip64 = false,
+                            .compressed_size = compressed_size,
+                        },
+                    },
                 });
-            }}
+            }
+        }
 
         if (entry_count > 0) {
             try self.segments.append(Segment{
                 .offset = central_directory_offset,
-                .kind = SegmentKind{.CentralDirectoryEntries = CentralDirectoryEntriesInfo{
-                    .entry_count = entry_count,
-                }},
+                .kind = SegmentKind{
+                    .CentralDirectoryEntries = CentralDirectoryEntriesInfo{ .entry_count = entry_count },
+                },
             });
         }
 
         try self.segments.append(Segment{
             .offset = eocdr_offset,
-            .kind = SegmentKind{.EndOfCentralDirectory = EndOfCentralDirectoryInfo{
-                .eocdr_offset = eocdr_offset,
-            }},
+            .kind = SegmentKind{
+                .EndOfCentralDirectory = EndOfCentralDirectoryInfo{ .eocdr_offset = eocdr_offset },
+            },
         });
     }
 
@@ -390,14 +394,16 @@ const ZipfileDumper = struct {
         const extra_fields_length = readInt16(lfh_buffer, 28);
 
         if (file_name_length > 0) {
-            self.indent(); defer self.outdent();
+            self.indent();
+            defer self.outdent();
             try self.output.print("\n");
             try self.writeSectionHeader(cursor, "File Name");
             try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
-            self.indent(); defer self.outdent();
+            self.indent();
+            defer self.outdent();
             try self.output.print("\n");
             try self.writeSectionHeader(cursor, "Extra Fields");
             try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
@@ -434,7 +440,9 @@ const ZipfileDumper = struct {
 
     fn dumpCentralDirectoryEntries(self: &Self, offset: u64, info: &const CentralDirectoryEntriesInfo) !u64 {
         var cursor = offset;
-            {var i: u32 = 0; while (i < info.entry_count) : (i += 1) {
+        {
+            var i: u32 = 0;
+            while (i < info.entry_count) : (i += 1) {
                 if (i > 0) try self.output.print("\n");
 
                 var cdr_buffer: [46]u8 = undefined;
@@ -473,24 +481,28 @@ const ZipfileDumper = struct {
                 const file_comment_length = readInt16(cdr_buffer, 32);
 
                 if (file_name_length > 0) {
-                    self.indent(); defer self.outdent();
+                    self.indent();
+                    defer self.outdent();
                     try self.writeSectionHeader(cursor, "File name");
                     try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
                     cursor += file_name_length;
                 }
                 if (extra_fields_length > 0) {
-                    self.indent(); defer self.outdent();
+                    self.indent();
+                    defer self.outdent();
                     try self.writeSectionHeader(cursor, "Extra Fields");
                     try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
                     cursor += extra_fields_length;
                 }
                 if (file_comment_length > 0) {
-                    self.indent(); defer self.outdent();
+                    self.indent();
+                    defer self.outdent();
                     try self.writeSectionHeader(cursor, "File Comment");
                     try self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
                     cursor += file_comment_length;
                 }
-            }}
+            }
+        }
 
         return cursor - offset;
     }
@@ -523,7 +535,8 @@ const ZipfileDumper = struct {
         total_length += 22;
 
         if (comment_length > 0) {
-            self.indent(); defer self.outdent();
+            self.indent();
+            defer self.outdent();
             try self.writeSectionHeader(offset + total_length, ".ZIP file comment");
             try self.dumpBlobContents(offset + total_length, comment_length, Encoding.Cp437);
             total_length += comment_length;
@@ -546,14 +559,17 @@ const ZipfileDumper = struct {
             try self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
             try self.printIndentation();
             const row_start = offset + cursor - buffer_offset;
-                {var i: usize = 0; while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
+            {
+                var i: usize = 0;
+                while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
                     try self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
                     cursor += 1;
-                }}
+                }
+            }
             try self.output.print("{x2}", buffer[offset + cursor - buffer_offset]);
             cursor += 1;
 
-            var row = buffer[row_start..offset + cursor - buffer_offset];
+            var row = buffer[row_start .. offset + cursor - buffer_offset];
             switch (encoding) {
                 Encoding.None => {},
                 Encoding.Cp437 => {
@@ -584,7 +600,7 @@ const ZipfileDumper = struct {
                         while (i < utf8_bytes_remaining) : (i += 1) {
                             utf8_byte_sequence_buffer[utf8_bytes_saved + i] = row[i];
                         }
-                        try self.dumpUtf8Codepoint(utf8_byte_sequence_buffer[0..utf8_bytes_saved + utf8_bytes_remaining]);
+                        try self.dumpUtf8Codepoint(utf8_byte_sequence_buffer[0 .. utf8_bytes_saved + utf8_bytes_remaining]);
                         utf8_bytes_saved = 0;
                         utf8_bytes_remaining = 0;
                     }
@@ -613,7 +629,7 @@ const ZipfileDumper = struct {
                         }
 
                         // we have a complete codepoint on this row
-                        try self.dumpUtf8Codepoint(row[i..i + utf8_length]);
+                        try self.dumpUtf8Codepoint(row[i .. i + utf8_length]);
                         i += utf8_length - 1;
                     }
                     try self.output.print("\"");
@@ -633,7 +649,7 @@ const ZipfileDumper = struct {
             '\n' => return self.output.write("\\n"),
             '\r' => return self.output.write("\\r"),
             '\t' => return self.output.write("\\t"),
-            '"'  => return self.output.write("\\\""),
+            '"' => return self.output.write("\\\""),
             '\\' => return self.output.write("\\\\"),
             else => {},
         }
@@ -659,9 +675,14 @@ const ZipfileDumper = struct {
         try self.output.print("\n");
     }
 
-    fn readStructField(self: &Self, buffer: []const u8, comptime max_size: usize, cursor: &usize,
-        comptime size: usize, name: []const u8) !void
-    {
+    fn readStructField(
+        self: &Self,
+        buffer: []const u8,
+        comptime max_size: usize,
+        cursor: &usize,
+        comptime size: usize,
+        name: []const u8,
+    ) !void {
         comptime std.debug.assert(size <= max_size);
         comptime const decimal_width_str = switch (max_size) {
             2 => "5",
@@ -676,13 +697,15 @@ const ZipfileDumper = struct {
                 var value = readInt16(buffer, cursor.*);
                 try self.output.print(
                     "{x2} {x2}" ++ ("   " ** (max_size - size)) ++
-                    " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
-                    " ; {d" ++ decimal_width_str ++ "}" ++
-                    " ; 0x{x4}" ++ ("  " ** (max_size - size)) ++
-                    " ; {}" ++
-                    "\n",
-                    buffer[cursor.* + 0], buffer[cursor.* + 1],
-                    cp437[buffer[cursor.* + 0]], cp437[buffer[cursor.* + 1]],
+                        " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
+                        " ; {d" ++ decimal_width_str ++ "}" ++
+                        " ; 0x{x4}" ++ ("  " ** (max_size - size)) ++
+                        " ; {}" ++
+                        "\n",
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
                     value,
                     value,
                     name,
@@ -692,13 +715,19 @@ const ZipfileDumper = struct {
                 var value = readInt32(buffer, cursor.*);
                 try self.output.print(
                     "{x2} {x2} {x2} {x2}" ++ ("   " ** (max_size - size)) ++
-                    " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
-                    " ; {d" ++ decimal_width_str ++ "}" ++
-                    " ; 0x{x8}" ++ ("  " ** (max_size - size)) ++
-                    " ; {}" ++
-                    "\n",
-                    buffer[cursor.* + 0], buffer[cursor.* + 1], buffer[cursor.* + 2], buffer[cursor.* + 3],
-                    cp437[buffer[cursor.* + 0]], cp437[buffer[cursor.* + 1]], cp437[buffer[cursor.* + 2]], cp437[buffer[cursor.* + 3]],
+                        " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
+                        " ; {d" ++ decimal_width_str ++ "}" ++
+                        " ; 0x{x8}" ++ ("  " ** (max_size - size)) ++
+                        " ; {}" ++
+                        "\n",
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    buffer[cursor.* + 2],
+                    buffer[cursor.* + 3],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
+                    cp437[buffer[cursor.* + 2]],
+                    cp437[buffer[cursor.* + 3]],
                     value,
                     value,
                     name,
@@ -721,9 +750,12 @@ const ZipfileDumper = struct {
         self.indentation -= 1;
     }
     fn printIndentation(self: &Self) !void {
-            {var i: u2 = 0; while (i < self.indentation) : (i += 1) {
+        {
+            var i: u2 = 0;
+            while (i < self.indentation) : (i += 1) {
                 try self.output.print("  ");
-            }}
+            }
+        }
     }
 
     fn readNoEof(self: &Self, offset: u64, buffer: []u8) !void {
@@ -746,30 +778,30 @@ const ZipfileDumper = struct {
 };
 
 fn readInt16(buffer: []const u8, offset: usize) u16 {
-    return std.mem.readIntLE(u16, buffer[offset..offset+2]);
+    return std.mem.readIntLE(u16, buffer[offset .. offset + 2]);
 }
 fn readInt32(buffer: []const u8, offset: usize) u32 {
-    return std.mem.readIntLE(u32, buffer[offset..offset+4]);
+    return std.mem.readIntLE(u32, buffer[offset .. offset + 4]);
 }
 fn readInt64(buffer: []const u8, offset: usize) u64 {
-    return std.mem.readIntLE(u64, buffer[offset..offset+8]);
+    return std.mem.readIntLE(u64, buffer[offset .. offset + 8]);
 }
 
 const cp437 = [][]const u8{
-    "�","☺","☻", "♥","♦","♣","♠","•","◘","○","◙","♂","♀", "♪","♫","☼",
-    "►","◄","↕", "‼","¶","§","▬","↨","↑","↓","→","←","∟", "↔","▲","▼",
-    " ","!","\"","#","$","%","&","'","(",")","*","+",",", "-",".","/",
-    "0","1","2", "3","4","5","6","7","8","9",":",";","<", "=",">","?",
-    "@","A","B", "C","D","E","F","G","H","I","J","K","L", "M","N","O",
-    "P","Q","R", "S","T","U","V","W","X","Y","Z","[","\\","]","^","_",
-    "`","a","b", "c","d","e","f","g","h","i","j","k","l", "m","n","o",
-    "p","q","r", "s","t","u","v","w","x","y","z","{","|", "}","~","⌂",
-    "Ç","ü","é", "â","ä","à","å","ç","ê","ë","è","ï","î", "ì","Ä","Å",
-    "É","æ","Æ", "ô","ö","ò","û","ù","ÿ","Ö","Ü","¢","£", "¥","₧","ƒ",
-    "á","í","ó", "ú","ñ","Ñ","ª","º","¿","⌐","¬","½","¼", "¡","«","»",
-    "░","▒","▓", "│","┤","╡","╢","╖","╕","╣","║","╗","╝", "╜","╛","┐",
-    "└","┴","┬", "├","─","┼","╞","╟","╚","╔","╩","╦","╠", "═","╬","╧",
-    "╨","╤","╥", "╙","╘","╒","╓","╫","╪","┘","┌","█","▄", "▌","▐","▀",
-    "α","ß","Γ", "π","Σ","σ","µ","τ","Φ","Θ","Ω","δ","∞", "φ","ε","∩",
-    "≡","±","≥", "≤","⌠","⌡","÷","≈","°","∙","·","√","ⁿ", "²","■"," ",
+    "�", "☺", "☻", "♥", "♦", "♣", "♠", "•", "◘", "○", "◙", "♂", "♀", "♪", "♫", "☼",
+    "►", "◄", "↕", "‼", "¶", "§", "▬", "↨", "↑", "↓", "→", "←", "∟", "↔", "▲", "▼",
+    " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
+    "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_",
+    "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+    "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", "⌂",
+    "Ç", "ü", "é", "â", "ä", "à", "å", "ç", "ê", "ë", "è", "ï", "î", "ì", "Ä", "Å",
+    "É", "æ", "Æ", "ô", "ö", "ò", "û", "ù", "ÿ", "Ö", "Ü", "¢", "£", "¥", "₧", "ƒ",
+    "á", "í", "ó", "ú", "ñ", "Ñ", "ª", "º", "¿", "⌐", "¬", "½", "¼", "¡", "«", "»",
+    "░", "▒", "▓", "│", "┤", "╡", "╢", "╖", "╕", "╣", "║", "╗", "╝", "╜", "╛", "┐",
+    "└", "┴", "┬", "├", "─", "┼", "╞", "╟", "╚", "╔", "╩", "╦", "╠", "═", "╬", "╧",
+    "╨", "╤", "╥", "╙", "╘", "╒", "╓", "╫", "╪", "┘", "┌", "█", "▄", "▌", "▐", "▀",
+    "α", "ß", "Γ", "π", "Σ", "σ", "µ", "τ", "Φ", "Θ", "Ω", "δ", "∞", "φ", "ε", "∩",
+    "≡", "±", "≥", "≤", "⌠", "⌡", "÷", "≈", "°", "∙", "·", "√", "ⁿ", "²", "■", " ",
 };
