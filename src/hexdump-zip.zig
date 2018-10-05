@@ -14,14 +14,14 @@ pub fn main() !void {
     const output_path_str = args.nextPosix() orelse return usage();
     if (args.nextPosix() != null) return usage();
 
-    var input_file = try std.os.File.openRead(general_allocator, input_path_str);
+    var input_file = try std.os.File.openRead(input_path_str);
     defer input_file.close();
 
-    var output_file = try std.os.File.openWrite(general_allocator, output_path_str);
+    var output_file = try std.os.File.openWrite(output_path_str);
     defer output_file.close();
 
     var zipfile_dumper: ZipfileDumper = undefined;
-    try zipfile_dumper.init(&input_file, &output_file, general_allocator);
+    try zipfile_dumper.init(input_file, output_file, general_allocator);
     try zipfile_dumper.doIt();
 }
 
@@ -46,7 +46,7 @@ const EndOfCentralDirectoryInfo = struct {
 const CentralDirectoryEntriesInfo = struct {
     entry_count: u32,
 };
-fn segmentLessThan(a: *const Segment, b: *const Segment) bool {
+fn segmentLessThan(a: Segment, b: Segment) bool {
     return a.offset < b.offset;
 }
 
@@ -74,14 +74,14 @@ const lfh_signature = 0x04034b50;
 const oddo_signature = 0x08074b50;
 
 const ZipfileDumper = struct {
-    const Self = this;
+    const Self = @This();
 
-    input_file: *std.os.File,
+    input_file: std.os.File,
     input_file_stream: std.io.FileInStream,
     input: *std.io.InStream(std.io.FileInStream.Error),
     file_size: u64,
     offset_padding: usize,
-    output_file: *std.os.File,
+    output_file: std.os.File,
     output_file_stream: std.io.FileOutStream,
     buffered_output_stream: std.io.BufferedOutStream(std.io.FileOutStream.Error),
     output: *std.io.OutStream(std.io.FileOutStream.Error),
@@ -90,7 +90,7 @@ const ZipfileDumper = struct {
     indentation: u2,
     mac_archive_utility_overflow_recovery_cursor: ?u64,
 
-    pub fn init(self: *Self, input_file: *std.os.File, output_file: *std.os.File, allocator: *std.mem.Allocator) !void {
+    pub fn init(self: *Self, input_file: std.os.File, output_file: std.os.File, allocator: *std.mem.Allocator) !void {
         // FIXME: return a new object once we have https://github.com/zig-lang/zig/issues/287
         self.input_file = input_file;
         self.input_file_stream = std.io.FileInStream.init(self.input_file);

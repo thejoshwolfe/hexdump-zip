@@ -6,11 +6,10 @@ produce an annotated hexdump of a zipfile
 Install [zig](http://ziglang.org/).
 
 ```
-$ mkdir build && cd build
-$ zig build-exe --library c ../src/hexdump-zip.zig
+zig build
 ```
 
-Executable binary is at `build/hexdump-zip`.
+Executable binary is at `zig-cache/hexdump-zip`.
 
 ## Run
 
