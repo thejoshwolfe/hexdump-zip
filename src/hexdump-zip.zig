@@ -77,14 +77,14 @@ const ZipfileDumper = struct {
     const Self = @This();
 
     input_file: std.os.File,
-    input_file_stream: std.io.FileInStream,
-    input: *std.io.InStream(std.io.FileInStream.Error),
+    input_file_stream: std.os.File.InStream,
+    input: *std.os.File.InStream.Stream,
     file_size: u64,
     offset_padding: usize,
     output_file: std.os.File,
-    output_file_stream: std.io.FileOutStream,
-    buffered_output_stream: std.io.BufferedOutStream(std.io.FileOutStream.Error),
-    output: *std.io.OutStream(std.io.FileOutStream.Error),
+    output_file_stream: std.os.File.OutStream,
+    buffered_output_stream: std.io.BufferedOutStream(std.os.File.OutStream.Error),
+    output: *std.os.File.OutStream.Stream,
     allocator: *std.mem.Allocator,
     segments: SegmentList,
     indentation: u2,
@@ -93,7 +93,7 @@ const ZipfileDumper = struct {
     pub fn init(self: *Self, input_file: std.os.File, output_file: std.os.File, allocator: *std.mem.Allocator) !void {
         // FIXME: return a new object once we have https://github.com/zig-lang/zig/issues/287
         self.input_file = input_file;
-        self.input_file_stream = std.io.FileInStream.init(self.input_file);
+        self.input_file_stream = self.input_file.inStream();
         self.input = &self.input_file_stream.stream;
         self.file_size = u64(try self.input_file.getEndPos()); // FIXME: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
         // this limit eliminates most silly overflow checks on the file offset.
@@ -105,8 +105,8 @@ const ZipfileDumper = struct {
         }
 
         self.output_file = output_file;
-        self.output_file_stream = std.io.FileOutStream.init(self.output_file);
-        self.buffered_output_stream = std.io.BufferedOutStream(std.io.FileOutStream.Error).init(&self.output_file_stream.stream);
+        self.output_file_stream = self.output_file.outStream();
+        self.buffered_output_stream = std.io.BufferedOutStream(std.os.File.OutStream.Error).init(&self.output_file_stream.stream);
         self.output = &self.buffered_output_stream.stream;
 
         self.allocator = allocator;
@@ -361,7 +361,7 @@ const ZipfileDumper = struct {
         }
     }
 
-    fn dumpLocalFile(self: *Self, offset: u64, info: *const LocalFileInfo) !u64 {
+    fn dumpLocalFile(self: *Self, offset: u64, info: LocalFileInfo) !u64 {
         var cursor = offset;
         var lfh_buffer: [30]u8 = undefined;
         try self.readNoEof(cursor, lfh_buffer[0..]);
@@ -438,7 +438,7 @@ const ZipfileDumper = struct {
         return cursor - offset;
     }
 
-    fn dumpCentralDirectoryEntries(self: *Self, offset: u64, info: *const CentralDirectoryEntriesInfo) !u64 {
+    fn dumpCentralDirectoryEntries(self: *Self, offset: u64, info: CentralDirectoryEntriesInfo) !u64 {
         var cursor = offset;
         {
             var i: u32 = 0;
@@ -507,7 +507,7 @@ const ZipfileDumper = struct {
         return cursor - offset;
     }
 
-    fn dumpEndOfCentralDirectory(self: *Self, offset: u64, info: *const EndOfCentralDirectoryInfo) !u64 {
+    fn dumpEndOfCentralDirectory(self: *Self, offset: u64, info: EndOfCentralDirectoryInfo) !u64 {
         var total_length: u64 = 0;
         if (offset != info.eocdr_offset) {
             const zip64_eocdl_offset = info.eocdr_offset - 20;
@@ -778,13 +778,16 @@ const ZipfileDumper = struct {
 };
 
 fn readInt16(buffer: []const u8, offset: usize) u16 {
-    return std.mem.readIntLE(u16, buffer[offset .. offset + 2]);
+    // FIXME https://github.com/ziglang/zig/issues/863
+    return std.mem.readIntSliceLittle(u16, buffer[offset .. offset + 2]);
 }
 fn readInt32(buffer: []const u8, offset: usize) u32 {
-    return std.mem.readIntLE(u32, buffer[offset .. offset + 4]);
+    // FIXME https://github.com/ziglang/zig/issues/863
+    return std.mem.readIntSliceLittle(u32, buffer[offset .. offset + 4]);
 }
 fn readInt64(buffer: []const u8, offset: usize) u64 {
-    return std.mem.readIntLE(u64, buffer[offset .. offset + 8]);
+    // FIXME https://github.com/ziglang/zig/issues/863
+    return std.mem.readIntSliceLittle(u64, buffer[offset .. offset + 8]);
 }
 
 const cp437 = [][]const u8{
