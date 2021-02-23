@@ -662,7 +662,7 @@ const ZipfileDumper = struct {
         const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, .{ .width = self.offset_padding, .fill = '0' })];
 
         try self.printIndentation();
-        try self.printf(":0x{} ; ", .{offset_str});
+        try self.printf(":0x{s} ; ", .{offset_str});
         try self.printf(fmt, args);
         try self.write("\n");
     }
@@ -689,10 +689,10 @@ const ZipfileDumper = struct {
                 var value = readInt16(buffer, cursor.*);
                 try self.printf( //
                     "{x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
-                    " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
+                    " ; \"{s}{s}\"" ++ (" " ** (max_size - size)) ++
                     " ; {d:0>" ++ decimal_width_str ++ "}" ++
                     " ; 0x{x:0>4}" ++ ("  " ** (max_size - size)) ++
-                    " ; {}" ++
+                    " ; {s}" ++
                     "\n", .{
                     buffer[cursor.* + 0],
                     buffer[cursor.* + 1],
@@ -707,10 +707,10 @@ const ZipfileDumper = struct {
                 var value = readInt32(buffer, cursor.*);
                 try self.printf( //
                     "{x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
-                    " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
+                    " ; \"{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
                     " ; {d:0>" ++ decimal_width_str ++ "}" ++
                     " ; 0x{x:0>8}" ++ ("  " ** (max_size - size)) ++
-                    " ; {}" ++
+                    " ; {s}" ++
                     "\n", .{
                     buffer[cursor.* + 0],
                     buffer[cursor.* + 1],
@@ -732,7 +732,7 @@ const ZipfileDumper = struct {
     }
 
     fn detectedMauCorruption(self: *Self, field_name: []const u8) void {
-        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {}\n", .{field_name});
+        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {s}\n", .{field_name});
     }
 
     fn indent(self: *Self) void {

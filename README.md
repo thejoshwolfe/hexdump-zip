@@ -9,7 +9,7 @@ Install [zig](http://ziglang.org/).
 zig build
 ```
 
-Executable binary is at `zig-cache/hexdump-zip`.
+Executable binary is at `./zig-cache/bin/hexdump-zip`.
 
 ## Run
 
