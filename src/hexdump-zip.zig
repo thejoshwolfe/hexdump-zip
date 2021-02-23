@@ -78,7 +78,7 @@ const ZipfileDumper = struct {
     file_size: u64,
     offset_padding: usize,
     output_file: std.fs.File,
-    output: @TypeOf(std.io.bufferedWriter(@as(std.fs.File, undefined))),
+    output: @TypeOf(std.io.bufferedWriter(@as(std.fs.File.Writer, undefined))),
     allocator: *std.mem.Allocator,
     segments: SegmentList,
     indentation: u2,
@@ -99,7 +99,7 @@ const ZipfileDumper = struct {
         }
 
         self.output_file = output_file;
-        self.output = std.io.bufferedWriter(self.output_file);
+        self.output = std.io.bufferedWriter(self.output_file.writer());
 
         self.allocator = allocator;
         self.segments = SegmentList.init(allocator);
@@ -110,7 +110,7 @@ const ZipfileDumper = struct {
     pub fn doIt(self: *Self) !void {
         try self.findSegments();
         try self.dumpSegments();
-        try self.buffered_output_stream.flush();
+        try self.output.flush();
     }
 
     fn findSegments(self: *Self) !void {
@@ -331,13 +331,13 @@ const ZipfileDumper = struct {
         var cursor: u64 = 0;
         for (self.segments.items) |segment, i| {
             if (i != 0) {
-                try self.output.print("\n");
+                try self.write("\n");
             }
 
             if (segment.offset > cursor) {
-                try self.writeSectionHeader(cursor, "Unused space");
+                try self.writeSectionHeader(cursor, "Unused space", .{});
                 try self.dumpBlobContents(cursor, segment.offset - cursor, Encoding.None);
-                try self.output.print("\n");
+                try self.write("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
                 cursor = segment.offset;
@@ -358,14 +358,14 @@ const ZipfileDumper = struct {
         var lfh_buffer: [30]u8 = undefined;
         try self.readNoEof(cursor, lfh_buffer[0..]);
         if (readInt32(&lfh_buffer, 0) != lfh_signature) {
-            try self.writeSectionHeader(offset, "WARNING: invalid local file header signature");
-            try self.output.print("\n");
+            try self.writeSectionHeader(offset, "WARNING: invalid local file header signature", .{});
+            try self.write("\n");
             // if this isn't a local file, idk what it is.
             // call it unknown
             return 0;
         }
 
-        try self.writeSectionHeader(offset, "Local File Header (#{})", info.entry_index);
+        try self.writeSectionHeader(offset, "Local File Header (#{})", .{info.entry_index});
         var lfh_cursor: usize = 0;
         try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 4, "Local file header signature");
         try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "Version needed to extract (minimum)");
@@ -388,23 +388,23 @@ const ZipfileDumper = struct {
         if (file_name_length > 0) {
             self.indent();
             defer self.outdent();
-            try self.output.print("\n");
-            try self.writeSectionHeader(cursor, "File Name");
+            try self.write("\n");
+            try self.writeSectionHeader(cursor, "File Name", .{});
             try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
             self.indent();
             defer self.outdent();
-            try self.output.print("\n");
-            try self.writeSectionHeader(cursor, "Extra Fields");
+            try self.write("\n");
+            try self.writeSectionHeader(cursor, "Extra Fields", .{});
             try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
             cursor += extra_fields_length;
         }
 
         if (info.compressed_size > 0) {
-            try self.output.print("\n");
-            try self.writeSectionHeader(cursor, "File Contents");
+            try self.write("\n");
+            try self.writeSectionHeader(cursor, "File Contents", .{});
             try self.dumpBlobContents(cursor, info.compressed_size, Encoding.None);
             cursor += info.compressed_size;
         }
@@ -412,15 +412,15 @@ const ZipfileDumper = struct {
         // check for the optional data descriptor
         var data_descriptor_buffer: [16]u8 = undefined;
         if (self.readNoEof(cursor, data_descriptor_buffer[0..])) {
-            if (readInt32(data_descriptor_buffer, 0) == oddo_signature) {
+            if (readInt32(&data_descriptor_buffer, 0) == oddo_signature) {
                 // this is a data descriptor
-                try self.output.print("\n");
-                try self.writeSectionHeader(cursor, "Optional Data Descriptor");
+                try self.write("\n");
+                try self.writeSectionHeader(cursor, "Optional Data Descriptor", .{});
                 var data_descriptor_cursor: usize = 0;
-                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
-                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
-                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
-                try self.readStructField(data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
+                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
+                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
+                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
                 cursor += data_descriptor_cursor;
             }
         } else |err| {
@@ -435,61 +435,61 @@ const ZipfileDumper = struct {
         {
             var i: u32 = 0;
             while (i < info.entry_count) : (i += 1) {
-                if (i > 0) try self.output.print("\n");
+                if (i > 0) try self.write("\n");
 
                 var cdr_buffer: [46]u8 = undefined;
                 try self.readNoEof(cursor, cdr_buffer[0..]);
-                if (readInt32(cdr_buffer, 0) != cfh_signature) {
-                    try self.writeSectionHeader(cursor, "WARNING: invalid central file header signature");
-                    try self.output.print("\n");
+                if (readInt32(&cdr_buffer, 0) != cfh_signature) {
+                    try self.writeSectionHeader(cursor, "WARNING: invalid central file header signature", .{});
+                    try self.write("\n");
                     return 0;
                 }
 
-                try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", i);
+                try self.writeSectionHeader(cursor, "Central Directory Entry (#{})", .{i});
                 var cdr_cursor: usize = 0;
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Version needed to extract (minimum)");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "General purpose bit flag");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Compression method");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification time");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File last modification date");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "CRC-32");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Compressed size");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Uncompressed size");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File name length (n)");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Extra field length (m)");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "File comment length (k)");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Disk number where file starts");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 2, "Internal file attributes");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "External file attributes");
-                try self.readStructField(cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "Central directory file header signature");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Version made by");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Version needed to extract (minimum)");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "General purpose bit flag");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Compression method");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "File last modification time");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "File last modification date");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "CRC-32");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "Compressed size");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "Uncompressed size");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "File name length (n)");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Extra field length (m)");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "File comment length (k)");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Disk number where file starts");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 2, "Internal file attributes");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "External file attributes");
+                try self.readStructField(&cdr_buffer, 4, &cdr_cursor, 4, "Relative offset of local file header");
                 cursor += cdr_cursor;
 
-                const general_purpose_bit_flag = readInt16(cdr_buffer, 8);
+                const general_purpose_bit_flag = readInt16(&cdr_buffer, 8);
                 const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
-                const file_name_length = readInt16(cdr_buffer, 28);
-                const extra_fields_length = readInt16(cdr_buffer, 30);
-                const file_comment_length = readInt16(cdr_buffer, 32);
+                const file_name_length = readInt16(&cdr_buffer, 28);
+                const extra_fields_length = readInt16(&cdr_buffer, 30);
+                const file_comment_length = readInt16(&cdr_buffer, 32);
 
                 if (file_name_length > 0) {
                     self.indent();
                     defer self.outdent();
-                    try self.writeSectionHeader(cursor, "File name");
+                    try self.writeSectionHeader(cursor, "File name", .{});
                     try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
                     cursor += file_name_length;
                 }
                 if (extra_fields_length > 0) {
                     self.indent();
                     defer self.outdent();
-                    try self.writeSectionHeader(cursor, "Extra Fields");
+                    try self.writeSectionHeader(cursor, "Extra Fields", .{});
                     try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
                     cursor += extra_fields_length;
                 }
                 if (file_comment_length > 0) {
                     self.indent();
                     defer self.outdent();
-                    try self.writeSectionHeader(cursor, "File Comment");
+                    try self.writeSectionHeader(cursor, "File Comment", .{});
                     try self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
                     cursor += file_comment_length;
                 }
@@ -503,33 +503,33 @@ const ZipfileDumper = struct {
         var total_length: u64 = 0;
         if (offset != info.eocdr_offset) {
             const zip64_eocdl_offset = info.eocdr_offset - 20;
-            try self.writeSectionHeader(offset, "Zip64 end of central directory record");
+            try self.writeSectionHeader(offset, "Zip64 end of central directory record", .{});
 
-            try self.writeSectionHeader(zip64_eocdl_offset, "Zip64 end of central directory locator");
+            try self.writeSectionHeader(zip64_eocdl_offset, "Zip64 end of central directory locator", .{});
 
             total_length = info.eocdr_offset - offset;
             @panic("TODO");
         }
 
-        try self.writeSectionHeader(offset + total_length, "End of central directory record");
+        try self.writeSectionHeader(offset + total_length, "End of central directory record", .{});
         var eocdr_buffer: [22]u8 = undefined;
         try self.readNoEof(offset, eocdr_buffer[0..]);
         var eocdr_cursor: usize = 0;
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "End of central directory signature");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Number of this disk");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Disk where central directory starts");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Number of central directory records on this disk");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Total number of central directory records");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "Size of central directory (bytes)");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 4, "Offset of start of central directory, relative to start of archive");
-        try self.readStructField(eocdr_buffer, 4, &eocdr_cursor, 2, "Comment Length");
-        const comment_length = readInt16(eocdr_buffer, 20);
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "End of central directory signature");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Number of this disk");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Disk where central directory starts");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Number of central directory records on this disk");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Total number of central directory records");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "Size of central directory (bytes)");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "Offset of start of central directory, relative to start of archive");
+        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Comment Length");
+        const comment_length = readInt16(&eocdr_buffer, 20);
         total_length += 22;
 
         if (comment_length > 0) {
             self.indent();
             defer self.outdent();
-            try self.writeSectionHeader(offset + total_length, ".ZIP file comment");
+            try self.writeSectionHeader(offset + total_length, ".ZIP file comment", .{});
             try self.dumpBlobContents(offset + total_length, comment_length, Encoding.Cp437);
             total_length += comment_length;
         }
@@ -554,11 +554,11 @@ const ZipfileDumper = struct {
             {
                 var i: usize = 0;
                 while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
-                    try self.output.print("{x2} ", buffer[offset + cursor - buffer_offset]);
+                    try self.printf("{x:0>2} ", .{buffer[offset + cursor - buffer_offset]});
                     cursor += 1;
                 }
             }
-            try self.output.print("{x2}", buffer[offset + cursor - buffer_offset]);
+            try self.printf("{x:0>2}", .{buffer[offset + cursor - buffer_offset]});
             cursor += 1;
 
             var row = buffer[row_start .. offset + cursor - buffer_offset];
@@ -568,23 +568,23 @@ const ZipfileDumper = struct {
                     if (length > row_length) {
                         var i: usize = row.len;
                         while (i < row_length) : (i += 1) {
-                            try self.output.print("   ");
+                            try self.write("   ");
                         }
                     }
-                    try self.output.print(" ; cp437\"");
+                    try self.write(" ; cp437\"");
                     for (row) |c| {
-                        try self.output.write(cp437[c]);
+                        try self.write(cp437[c]);
                     }
-                    try self.output.print("\"");
+                    try self.write("\"");
                 },
                 Encoding.Utf8 => {
                     if (length > row_length) {
                         var i: usize = row.len;
                         while (i < row_length) : (i += 1) {
-                            try self.output.print("   ");
+                            try self.write("   ");
                         }
                     }
-                    try self.output.print(" ; utf8\"");
+                    try self.write(" ; utf8\"");
 
                     // input is utf8; output is utf8.
                     var i: usize = 0;
@@ -600,7 +600,7 @@ const ZipfileDumper = struct {
                     while (i < row.len) : (i += 1) {
                         const utf8_length = std.unicode.utf8ByteSequenceLength(row[i]) catch {
                             // invalid utf8 start byte. replace with the error character.
-                            try self.output.write(error_character);
+                            try self.write(error_character);
                             continue;
                         };
 
@@ -608,7 +608,7 @@ const ZipfileDumper = struct {
                             // this sequence wraps onto the next line.
                             if (i + utf8_length - row.len > length - cursor) {
                                 // there is no next line. unexpected eof.
-                                try self.output.write(error_character);
+                                try self.write(error_character);
                                 break;
                             }
                             var j: usize = 0;
@@ -624,47 +624,47 @@ const ZipfileDumper = struct {
                         try self.dumpUtf8Codepoint(row[i .. i + utf8_length]);
                         i += utf8_length - 1;
                     }
-                    try self.output.print("\"");
+                    try self.write("\"");
                 },
             }
-            try self.output.print("\n");
+            try self.write("\n");
         }
     }
 
     fn dumpUtf8Codepoint(self: *Self, byte_sequence: []const u8) !void {
         const codepoint = std.unicode.utf8Decode(byte_sequence) catch {
             // invalid utf8 seequcne becomes a single error character.
-            return self.output.write(error_character);
+            return self.write(error_character);
         };
         // some special escapes
         switch (codepoint) {
-            '\n' => return self.output.write("\\n"),
-            '\r' => return self.output.write("\\r"),
-            '\t' => return self.output.write("\\t"),
-            '"' => return self.output.write("\\\""),
-            '\\' => return self.output.write("\\\\"),
+            '\n' => return self.write("\\n"),
+            '\r' => return self.write("\\r"),
+            '\t' => return self.write("\\t"),
+            '"' => return self.write("\\\""),
+            '\\' => return self.write("\\\\"),
             else => {},
         }
         // numeric escapes
         switch (codepoint) {
             // ascii control codes
-            0...0x1f, 0x7f => return self.output.print("\\x{x2}", codepoint),
+            0...0x1f, 0x7f => return self.printf("\\x{x:0>2}", .{codepoint}),
             // unicode newline characters
-            0x805, 0x2028, 0x2029 => return self.output.print("\\u{x4}", codepoint),
+            0x805, 0x2028, 0x2029 => return self.printf("\\u{x:0>4}", .{codepoint}),
             else => {},
         }
         // literal character
-        return self.output.write(byte_sequence);
+        return self.write(byte_sequence);
     }
 
     fn writeSectionHeader(self: *Self, offset: u64, comptime fmt: []const u8, args: anytype) !void {
         var offset_str_buf: [16]u8 = undefined;
-        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, self.offset_padding)];
+        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, .{ .width = self.offset_padding, .fill = '0' })];
 
         try self.printIndentation();
-        try self.output.print(":0x{} ; ", .{offset_str});
-        try self.output.print(fmt, args);
-        try self.output.print("\n");
+        try self.printf(":0x{} ; ", .{offset_str});
+        try self.printf(fmt, args);
+        try self.write("\n");
     }
 
     fn readStructField(
@@ -687,13 +687,13 @@ const ZipfileDumper = struct {
         switch (size) {
             2 => {
                 var value = readInt16(buffer, cursor.*);
-                try self.output.print(
-                    "{x2} {x2}" ++ ("   " ** (max_size - size)) ++
-                        " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
-                        " ; {d" ++ decimal_width_str ++ "}" ++
-                        " ; 0x{x4}" ++ ("  " ** (max_size - size)) ++
-                        " ; {}" ++
-                        "\n",
+                try self.printf( //
+                    "{x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{}{}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>4}" ++ ("  " ** (max_size - size)) ++
+                    " ; {}" ++
+                    "\n", .{
                     buffer[cursor.* + 0],
                     buffer[cursor.* + 1],
                     cp437[buffer[cursor.* + 0]],
@@ -701,17 +701,17 @@ const ZipfileDumper = struct {
                     value,
                     value,
                     name,
-                );
+                });
             },
             4 => {
                 var value = readInt32(buffer, cursor.*);
-                try self.output.print(
-                    "{x2} {x2} {x2} {x2}" ++ ("   " ** (max_size - size)) ++
-                        " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
-                        " ; {d" ++ decimal_width_str ++ "}" ++
-                        " ; 0x{x8}" ++ ("  " ** (max_size - size)) ++
-                        " ; {}" ++
-                        "\n",
+                try self.printf( //
+                    "{x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{}{}{}{}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>8}" ++ ("  " ** (max_size - size)) ++
+                    " ; {}" ++
+                    "\n", .{
                     buffer[cursor.* + 0],
                     buffer[cursor.* + 1],
                     buffer[cursor.* + 2],
@@ -723,7 +723,7 @@ const ZipfileDumper = struct {
                     value,
                     value,
                     name,
-                );
+                });
             },
             8 => @panic("TODO"),
             else => unreachable,
@@ -745,9 +745,15 @@ const ZipfileDumper = struct {
         {
             var i: u2 = 0;
             while (i < self.indentation) : (i += 1) {
-                try self.output.print("  ");
+                try self.write("  ");
             }
         }
+    }
+    fn write(self: *Self, str: []const u8) !void {
+        try self.output.writer().writeAll(str);
+    }
+    fn printf(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        try self.output.writer().print(fmt, args);
     }
 
     fn readNoEof(self: *Self, offset: u64, buffer: []u8) !void {
@@ -782,7 +788,7 @@ fn readInt64(buffer: []const u8, offset: usize) u64 {
     return std.mem.readIntSliceLittle(u64, buffer[offset..][0..8]);
 }
 
-const cp437 = [][]const u8{
+const cp437 = [_][]const u8{
     "�", "☺", "☻", "♥", "♦", "♣", "♠", "•", "◘", "○", "◙", "♂", "♀", "♪", "♫", "☼",
     "►", "◄", "↕", "‼", "¶",  "§",  "▬", "↨", "↑", "↓", "→", "←", "∟", "↔", "▲", "▼",
     " ",   "!",   "\"",  "#",   "$",   "%",   "&",   "'",   "(",   ")",   "*",   "+",   ",",   "-",   ".",   "/",
