@@ -3,21 +3,21 @@ const std = @import("std");
 const general_allocator = std.heap.c_allocator;
 
 fn usage() !void {
-    std.debug.warn("usage: INPUT.zip OUTPUT.hex\n");
+    std.debug.warn("usage: INPUT.zip OUTPUT.hex\n", .{});
     return error.Usage;
 }
 
 pub fn main() !void {
-    var args = std.os.args();
+    var args = std.process.args();
     _ = args.nextPosix() orelse return usage();
     const input_path_str = args.nextPosix() orelse return usage();
     const output_path_str = args.nextPosix() orelse return usage();
     if (args.nextPosix() != null) return usage();
 
-    var input_file = try std.os.File.openRead(input_path_str);
+    var input_file = try std.fs.cwd().openFile(input_path_str, .{});
     defer input_file.close();
 
-    var output_file = try std.os.File.openWrite(output_path_str);
+    var output_file = try std.fs.cwd().createFile(output_path_str, .{});
     defer output_file.close();
 
     var zipfile_dumper: ZipfileDumper = undefined;
@@ -46,7 +46,7 @@ const EndOfCentralDirectoryInfo = struct {
 const CentralDirectoryEntriesInfo = struct {
     entry_count: u32,
 };
-fn segmentLessThan(a: Segment, b: Segment) bool {
+fn segmentLessThan(_: void, a: Segment, b: Segment) bool {
     return a.offset < b.offset;
 }
 
@@ -74,40 +74,32 @@ const lfh_signature = 0x04034b50;
 const oddo_signature = 0x08074b50;
 
 const ZipfileDumper = struct {
-    const Self = @This();
-
-    input_file: std.os.File,
-    input_file_stream: std.os.File.InStream,
-    input: *std.os.File.InStream.Stream,
+    input_file: std.fs.File,
     file_size: u64,
     offset_padding: usize,
-    output_file: std.os.File,
-    output_file_stream: std.os.File.OutStream,
-    buffered_output_stream: std.io.BufferedOutStream(std.os.File.OutStream.Error),
-    output: *std.os.File.OutStream.Stream,
+    output_file: std.fs.File,
+    output: @TypeOf(std.io.bufferedWriter(@as(std.fs.File, undefined))),
     allocator: *std.mem.Allocator,
     segments: SegmentList,
     indentation: u2,
     mac_archive_utility_overflow_recovery_cursor: ?u64,
 
-    pub fn init(self: *Self, input_file: std.os.File, output_file: std.os.File, allocator: *std.mem.Allocator) !void {
+    const Self = @This();
+
+    pub fn init(self: *Self, input_file: std.fs.File, output_file: std.fs.File, allocator: *std.mem.Allocator) !void {
         // FIXME: return a new object once we have https://github.com/zig-lang/zig/issues/287
         self.input_file = input_file;
-        self.input_file_stream = self.input_file.inStream();
-        self.input = &self.input_file_stream.stream;
-        self.file_size = u64(try self.input_file.getEndPos()); // FIXME: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
+        self.file_size = try self.input_file.getEndPos();
         // this limit eliminates most silly overflow checks on the file offset.
         if (self.file_size > 0x7fffffffffffffff) return error.FileTooBig;
 
         {
             var tmp: [16]u8 = undefined;
-            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, false, 0);
+            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, false, .{});
         }
 
         self.output_file = output_file;
-        self.output_file_stream = self.output_file.outStream();
-        self.buffered_output_stream = std.io.BufferedOutStream(std.os.File.OutStream.Error).init(&self.output_file_stream.stream);
-        self.output = &self.buffered_output_stream.stream;
+        self.output = std.io.bufferedWriter(self.output_file);
 
         self.allocator = allocator;
         self.segments = SegmentList.init(allocator);
@@ -125,7 +117,7 @@ const ZipfileDumper = struct {
         // find the eocdr
         if (self.file_size < eocdr_size) return error.NotAZipFile;
         var eocdr_search_buffer: [eocdr_search_size]u8 = undefined;
-        const eocdr_search_slice = eocdr_search_buffer[0..usize(std.math.min(self.file_size, eocdr_search_size))];
+        const eocdr_search_slice = eocdr_search_buffer[0..std.math.min(self.file_size, eocdr_search_size)];
         try self.readNoEof(self.file_size - eocdr_search_slice.len, eocdr_search_slice);
         // seek backward over the comment looking for the signature
         var comment_length: u16 = 0;
@@ -190,11 +182,11 @@ const ZipfileDumper = struct {
                 var cfh_buffer: [46]u8 = undefined;
                 try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
 
-                var compressed_size: u64 = readInt32(cfh_buffer, 20);
-                const file_name_length = readInt16(cfh_buffer, 28);
-                const extra_fields_length = readInt16(cfh_buffer, 30);
-                const file_comment_length = readInt16(cfh_buffer, 32);
-                var local_header_offset: u64 = readInt32(cfh_buffer, 42);
+                var compressed_size: u64 = readInt32(&cfh_buffer, 20);
+                const file_name_length = readInt16(&cfh_buffer, 28);
+                const extra_fields_length = readInt16(&cfh_buffer, 30);
+                const file_comment_length = readInt16(&cfh_buffer, 32);
+                var local_header_offset: u64 = readInt32(&cfh_buffer, 42);
 
                 // TODO: check for ZIP64 format
                 var is_zip64 = false;
@@ -229,8 +221,8 @@ const ZipfileDumper = struct {
                     // peek at the local file header's fields
                     var lfh_buffer: [30]u8 = undefined;
                     try self.readNoEof(local_header_offset, lfh_buffer[0..]);
-                    const local_file_name_length = readInt16(lfh_buffer, 26);
-                    const local_extra_fields_length = readInt16(lfh_buffer, 28);
+                    const local_file_name_length = readInt16(&lfh_buffer, 26);
+                    const local_extra_fields_length = readInt16(&lfh_buffer, 28);
                     mac_archive_utility_overflow_recovery_cursor.* += 30;
                     mac_archive_utility_overflow_recovery_cursor.* += local_file_name_length;
                     mac_archive_utility_overflow_recovery_cursor.* += local_extra_fields_length;
@@ -283,7 +275,7 @@ const ZipfileDumper = struct {
                             self.mac_archive_utility_overflow_recovery_cursor = null;
                             break :mac_stuff;
                         };
-                        if (possible_signature == if (expect_oddo) oddo_signature else if (entry_index == entry_count - 1) cfh_signature else u32(lfh_signature)) {
+                        if (possible_signature == if (expect_oddo) oddo_signature else if (entry_index == entry_count - 1) cfh_signature else @as(u32, lfh_signature)) {
                             // This is *probably* the end of the file contents.
                             // Or maybe this signature just happens to show up in the file contents.
                             // It's impossible to avoid ambiguities like this when trying to recover from the corruption,
@@ -334,10 +326,10 @@ const ZipfileDumper = struct {
     }
 
     fn dumpSegments(self: *Self) !void {
-        std.sort.insertionSort(Segment, self.segments.toSlice(), segmentLessThan);
+        std.sort.insertionSort(Segment, self.segments.items, {}, segmentLessThan);
 
         var cursor: u64 = 0;
-        for (self.segments.toSliceConst()) |segment, i| {
+        for (self.segments.items) |segment, i| {
             if (i != 0) {
                 try self.output.print("\n");
             }
@@ -365,7 +357,7 @@ const ZipfileDumper = struct {
         var cursor = offset;
         var lfh_buffer: [30]u8 = undefined;
         try self.readNoEof(cursor, lfh_buffer[0..]);
-        if (readInt32(lfh_buffer, 0) != lfh_signature) {
+        if (readInt32(&lfh_buffer, 0) != lfh_signature) {
             try self.writeSectionHeader(offset, "WARNING: invalid local file header signature");
             try self.output.print("\n");
             // if this isn't a local file, idk what it is.
@@ -375,23 +367,23 @@ const ZipfileDumper = struct {
 
         try self.writeSectionHeader(offset, "Local File Header (#{})", info.entry_index);
         var lfh_cursor: usize = 0;
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Local file header signature");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Version needed to extract (minimum)");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "General purpose bit flag");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Compression method");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File last modification time");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File last modification date");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "CRC-32");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Compressed size");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 4, "Uncompressed size");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "File name length (n)");
-        try self.readStructField(lfh_buffer, 4, &lfh_cursor, 2, "Extra field length (m)");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 4, "Local file header signature");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "Version needed to extract (minimum)");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "General purpose bit flag");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "Compression method");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "File last modification time");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "File last modification date");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 4, "CRC-32");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 4, "Compressed size");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 4, "Uncompressed size");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "File name length (n)");
+        try self.readStructField(&lfh_buffer, 4, &lfh_cursor, 2, "Extra field length (m)");
         cursor += lfh_cursor;
 
-        const file_name_length = readInt16(lfh_buffer, 26);
-        const general_purpose_bit_flag = readInt16(lfh_buffer, 6);
+        const file_name_length = readInt16(&lfh_buffer, 26);
+        const general_purpose_bit_flag = readInt16(&lfh_buffer, 6);
         const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
-        const extra_fields_length = readInt16(lfh_buffer, 28);
+        const extra_fields_length = readInt16(&lfh_buffer, 28);
 
         if (file_name_length > 0) {
             self.indent();
@@ -665,12 +657,12 @@ const ZipfileDumper = struct {
         return self.output.write(byte_sequence);
     }
 
-    fn writeSectionHeader(self: *Self, offset: u64, comptime fmt: []const u8, args: ...) !void {
+    fn writeSectionHeader(self: *Self, offset: u64, comptime fmt: []const u8, args: anytype) !void {
         var offset_str_buf: [16]u8 = undefined;
         const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, self.offset_padding)];
 
         try self.printIndentation();
-        try self.output.print(":0x{} ; ", offset_str);
+        try self.output.print(":0x{} ; ", .{offset_str});
         try self.output.print(fmt, args);
         try self.output.print("\n");
     }
@@ -740,7 +732,7 @@ const ZipfileDumper = struct {
     }
 
     fn detectedMauCorruption(self: *Self, field_name: []const u8) void {
-        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {}\n", field_name);
+        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {}\n", .{field_name});
     }
 
     fn indent(self: *Self) void {
@@ -759,8 +751,8 @@ const ZipfileDumper = struct {
     }
 
     fn readNoEof(self: *Self, offset: u64, buffer: []u8) !void {
-        try self.input_file.seekTo(usize(offset)); // FIXME: shouldn't need cast: https://github.com/zig-lang/zig/issues/637
-        try self.input.readNoEof(buffer);
+        try self.input_file.seekTo(offset);
+        try self.input_file.reader().readNoEof(buffer);
     }
     fn readByteAt(self: *Self, offset: u64) !u8 {
         var buffer: [1]u8 = undefined;
@@ -770,7 +762,7 @@ const ZipfileDumper = struct {
     fn readInt32At(self: *Self, offset: u64) !u32 {
         var buffer: [4]u8 = undefined;
         try self.readNoEof(offset, buffer[0..]);
-        return readInt32(buffer, 0);
+        return readInt32(&buffer, 0);
     }
     fn isSignatureAt(self: *Self, offset: u64, signature: u32) bool {
         return signature == (self.readInt32At(offset) catch return false);
@@ -779,32 +771,32 @@ const ZipfileDumper = struct {
 
 fn readInt16(buffer: []const u8, offset: usize) u16 {
     // FIXME https://github.com/ziglang/zig/issues/863
-    return std.mem.readIntSliceLittle(u16, buffer[offset .. offset + 2]);
+    return std.mem.readIntSliceLittle(u16, buffer[offset..][0..2]);
 }
 fn readInt32(buffer: []const u8, offset: usize) u32 {
     // FIXME https://github.com/ziglang/zig/issues/863
-    return std.mem.readIntSliceLittle(u32, buffer[offset .. offset + 4]);
+    return std.mem.readIntSliceLittle(u32, buffer[offset..][0..4]);
 }
 fn readInt64(buffer: []const u8, offset: usize) u64 {
     // FIXME https://github.com/ziglang/zig/issues/863
-    return std.mem.readIntSliceLittle(u64, buffer[offset .. offset + 8]);
+    return std.mem.readIntSliceLittle(u64, buffer[offset..][0..8]);
 }
 
 const cp437 = [][]const u8{
     "�", "☺", "☻", "♥", "♦", "♣", "♠", "•", "◘", "○", "◙", "♂", "♀", "♪", "♫", "☼",
-    "►", "◄", "↕", "‼", "¶", "§", "▬", "↨", "↑", "↓", "→", "←", "∟", "↔", "▲", "▼",
-    " ", "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
-    "@", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
-    "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "[", "\\", "]", "^", "_",
-    "`", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
-    "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "{", "|", "}", "~", "⌂",
-    "Ç", "ü", "é", "â", "ä", "à", "å", "ç", "ê", "ë", "è", "ï", "î", "ì", "Ä", "Å",
-    "É", "æ", "Æ", "ô", "ö", "ò", "û", "ù", "ÿ", "Ö", "Ü", "¢", "£", "¥", "₧", "ƒ",
-    "á", "í", "ó", "ú", "ñ", "Ñ", "ª", "º", "¿", "⌐", "¬", "½", "¼", "¡", "«", "»",
+    "►", "◄", "↕", "‼", "¶",  "§",  "▬", "↨", "↑", "↓", "→", "←", "∟", "↔", "▲", "▼",
+    " ",   "!",   "\"",  "#",   "$",   "%",   "&",   "'",   "(",   ")",   "*",   "+",   ",",   "-",   ".",   "/",
+    "0",   "1",   "2",   "3",   "4",   "5",   "6",   "7",   "8",   "9",   ":",   ";",   "<",   "=",   ">",   "?",
+    "@",   "A",   "B",   "C",   "D",   "E",   "F",   "G",   "H",   "I",   "J",   "K",   "L",   "M",   "N",   "O",
+    "P",   "Q",   "R",   "S",   "T",   "U",   "V",   "W",   "X",   "Y",   "Z",   "[",   "\\",  "]",   "^",   "_",
+    "`",   "a",   "b",   "c",   "d",   "e",   "f",   "g",   "h",   "i",   "j",   "k",   "l",   "m",   "n",   "o",
+    "p",   "q",   "r",   "s",   "t",   "u",   "v",   "w",   "x",   "y",   "z",   "{",   "|",   "}",   "~",   "⌂",
+    "Ç",  "ü",  "é",  "â",  "ä",  "à",  "å",  "ç",  "ê",  "ë",  "è",  "ï",  "î",  "ì",  "Ä",  "Å",
+    "É",  "æ",  "Æ",  "ô",  "ö",  "ò",  "û",  "ù",  "ÿ",  "Ö",  "Ü",  "¢",  "£",  "¥",  "₧", "ƒ",
+    "á",  "í",  "ó",  "ú",  "ñ",  "Ñ",  "ª",  "º",  "¿",  "⌐", "¬",  "½",  "¼",  "¡",  "«",  "»",
     "░", "▒", "▓", "│", "┤", "╡", "╢", "╖", "╕", "╣", "║", "╗", "╝", "╜", "╛", "┐",
     "└", "┴", "┬", "├", "─", "┼", "╞", "╟", "╚", "╔", "╩", "╦", "╠", "═", "╬", "╧",
     "╨", "╤", "╥", "╙", "╘", "╒", "╓", "╫", "╪", "┘", "┌", "█", "▄", "▌", "▐", "▀",
-    "α", "ß", "Γ", "π", "Σ", "σ", "µ", "τ", "Φ", "Θ", "Ω", "δ", "∞", "φ", "ε", "∩",
-    "≡", "±", "≥", "≤", "⌠", "⌡", "÷", "≈", "°", "∙", "·", "√", "ⁿ", "²", "■", " ",
+    "α",  "ß",  "Γ",  "π",  "Σ",  "σ",  "µ",  "τ",  "Φ",  "Θ",  "Ω",  "δ",  "∞", "φ",  "ε",  "∩",
+    "≡", "±",  "≥", "≤", "⌠", "⌡", "÷",  "≈", "°",  "∙", "·",  "√", "ⁿ", "²",  "■", " ",
 };
