@@ -3,7 +3,7 @@ const std = @import("std");
 const general_allocator = std.heap.c_allocator;
 
 fn usage() !void {
-    std.debug.warn("usage: INPUT.zip OUTPUT.hex\n", .{});
+    std.debug.print("usage: INPUT.zip OUTPUT.hex\n", .{});
     return error.Usage;
 }
 
@@ -79,14 +79,14 @@ const ZipfileDumper = struct {
     offset_padding: usize,
     output_file: std.fs.File,
     output: @TypeOf(std.io.bufferedWriter(@as(std.fs.File.Writer, undefined))),
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     segments: SegmentList,
     indentation: u2,
     mac_archive_utility_overflow_recovery_cursor: ?u64,
 
     const Self = @This();
 
-    pub fn init(self: *Self, input_file: std.fs.File, output_file: std.fs.File, allocator: *std.mem.Allocator) !void {
+    pub fn init(self: *Self, input_file: std.fs.File, output_file: std.fs.File, allocator: std.mem.Allocator) !void {
         // FIXME: return a new object once we have https://github.com/zig-lang/zig/issues/287
         self.input_file = input_file;
         self.file_size = try self.input_file.getEndPos();
@@ -95,7 +95,7 @@ const ZipfileDumper = struct {
 
         {
             var tmp: [16]u8 = undefined;
-            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, false, .{});
+            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, .lower, .{});
         }
 
         self.output_file = output_file;
@@ -160,11 +160,11 @@ const ZipfileDumper = struct {
                         // found it.
                         var warning_count: u2 = 0;
                         if (central_directory_offset > 0xffffffff) {
-                            self.detectedMauCorruption("offset of start of central directory with respect to the starting disk number");
+                            detectedMauCorruption("offset of start of central directory with respect to the starting disk number");
                             warning_count += 1;
                         }
                         if (central_directory_offset < calculated_central_directory_offset) {
-                            self.detectedMauCorruption("size of the central directory");
+                            detectedMauCorruption("size of the central directory");
                             warning_count += 1;
                         }
                         std.debug.assert(warning_count > 0);
@@ -190,6 +190,7 @@ const ZipfileDumper = struct {
 
                 // TODO: check for ZIP64 format
                 var is_zip64 = false;
+                _ = is_zip64;
 
                 central_directory_cursor += 46;
                 central_directory_cursor += file_name_length;
@@ -210,7 +211,7 @@ const ZipfileDumper = struct {
                         // peek and see if there's a signature where we suspect.
                         if (self.isSignatureAt(mac_archive_utility_overflow_recovery_cursor.*, lfh_signature)) {
                             // ok *maybe* this is a coincidence, but it really looks like corruption.
-                            self.detectedMauCorruption("relative offset of local header");
+                            detectedMauCorruption("relative offset of local header");
                             local_header_offset = mac_archive_utility_overflow_recovery_cursor.*;
                         }
                     }
@@ -237,7 +238,7 @@ const ZipfileDumper = struct {
                                 // I wonder if there's actually more entries here.
                                 if (self.isSignatureAt(central_directory_cursor, cfh_signature)) {
                                     // Yep. There's more entries.
-                                    self.detectedMauCorruption("total number of entries in the central directory");
+                                    detectedMauCorruption("total number of entries in the central directory");
                                     entry_count += 0x10000;
                                 }
                             }
@@ -291,7 +292,7 @@ const ZipfileDumper = struct {
                     }
 
                     if (compressed_size > 0xffffffff) {
-                        self.detectedMauCorruption("compressed size");
+                        detectedMauCorruption("compressed size");
                     }
                 }
 
@@ -423,7 +424,7 @@ const ZipfileDumper = struct {
                 try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
                 cursor += data_descriptor_cursor;
             }
-        } else |err| {
+        } else |_| {
             // ok, so there's no optional data descriptor here
         }
 
@@ -659,7 +660,7 @@ const ZipfileDumper = struct {
 
     fn writeSectionHeader(self: *Self, offset: u64, comptime fmt: []const u8, args: anytype) !void {
         var offset_str_buf: [16]u8 = undefined;
-        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, .{ .width = self.offset_padding, .fill = '0' })];
+        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, .lower, .{ .width = self.offset_padding, .fill = '0' })];
 
         try self.printIndentation();
         try self.printf(":0x{s} ; ", .{offset_str});
@@ -676,7 +677,7 @@ const ZipfileDumper = struct {
         name: []const u8,
     ) !void {
         comptime std.debug.assert(size <= max_size);
-        comptime const decimal_width_str = switch (max_size) {
+        const decimal_width_str = switch (max_size) {
             2 => "5",
             4 => "10",
             8 => "20",
@@ -731,8 +732,8 @@ const ZipfileDumper = struct {
         cursor.* += size;
     }
 
-    fn detectedMauCorruption(self: *Self, field_name: []const u8) void {
-        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {s}\n", .{field_name});
+    fn detectedMauCorruption(field_name: []const u8) void {
+        std.debug.print("WARNING: detected Mac Archive Utility corruption in field: {s}\n", .{field_name});
     }
 
     fn indent(self: *Self) void {
