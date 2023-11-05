@@ -333,11 +333,11 @@ const ZipfileDumper = struct {
         var cursor: u64 = 0;
         var first_segment = true;
         for (self.segments.items) |segment| {
-            if (first_segment) {
+            if (!first_segment) {
                 try self.write("\n");
+            } else {
                 first_segment = false;
             }
-
             if (segment.offset > cursor) {
                 try self.writeSectionHeader(cursor, "Unused space", .{});
                 try self.dumpBlobContents(cursor, segment.offset - cursor, Encoding.None);
