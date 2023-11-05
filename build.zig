@@ -1,9 +1,16 @@
 const Builder = @import("std").build.Builder;
 
 pub fn build(b: *Builder) void {
-    const exe = b.addExecutable("hexdump-zip", "src/hexdump-zip.zig");
-    exe.setBuildMode(b.standardReleaseOptions());
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const exe = b.addExecutable(.{
+        .name = "hexdump-zip",
+        .root_source_file = .{
+            .path = "src/hexdump-zip.zig"
+        },
+        .target = target,
+        .optimize = optimize,
+    });
     exe.linkSystemLibrary("c");
-    exe.install();
-    b.default_step.dependOn(&exe.step);
+    b.installArtifact(exe);
 }

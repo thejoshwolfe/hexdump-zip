@@ -1,18 +1,18 @@
 const std = @import("std");
 
-const general_allocator = std.heap.c_allocator;
+var general_allocator = std.heap.c_allocator;
 
 fn usage() !void {
-    std.debug.warn("usage: INPUT.zip OUTPUT.hex\n", .{});
+    std.debug.print("usage: INPUT.zip OUTPUT.hex\n", .{});
     return error.Usage;
 }
 
 pub fn main() !void {
     var args = std.process.args();
-    _ = args.nextPosix() orelse return usage();
-    const input_path_str = args.nextPosix() orelse return usage();
-    const output_path_str = args.nextPosix() orelse return usage();
-    if (args.nextPosix() != null) return usage();
+    _ = args.next() orelse return usage();
+    const input_path_str = args.next() orelse return usage();
+    const output_path_str = args.next() orelse return usage();
+    if (args.next() != null) return usage();
 
     var input_file = try std.fs.cwd().openFile(input_path_str, .{});
     defer input_file.close();
@@ -21,7 +21,7 @@ pub fn main() !void {
     defer output_file.close();
 
     var zipfile_dumper: ZipfileDumper = undefined;
-    try zipfile_dumper.init(input_file, output_file, general_allocator);
+    try zipfile_dumper.init(input_file, output_file, &general_allocator);
     try zipfile_dumper.doIt();
 }
 
@@ -95,14 +95,15 @@ const ZipfileDumper = struct {
 
         {
             var tmp: [16]u8 = undefined;
-            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16, false, .{});
+            self.offset_padding = std.fmt.formatIntBuf(tmp[0..], self.file_size, 16,
+                                                       std.fmt.Case.lower, .{});
         }
 
         self.output_file = output_file;
         self.output = std.io.bufferedWriter(self.output_file.writer());
 
         self.allocator = allocator;
-        self.segments = SegmentList.init(allocator);
+        self.segments = SegmentList.init(allocator.*);
         self.indentation = 0;
         self.mac_archive_utility_overflow_recovery_cursor = 0;
     }
@@ -117,7 +118,7 @@ const ZipfileDumper = struct {
         // find the eocdr
         if (self.file_size < eocdr_size) return error.NotAZipFile;
         var eocdr_search_buffer: [eocdr_search_size]u8 = undefined;
-        const eocdr_search_slice = eocdr_search_buffer[0..std.math.min(self.file_size, eocdr_search_size)];
+        const eocdr_search_slice = eocdr_search_buffer[0..@min(self.file_size, eocdr_search_size)];
         try self.readNoEof(self.file_size - eocdr_search_slice.len, eocdr_search_slice);
         // seek backward over the comment looking for the signature
         var comment_length: u16 = 0;
@@ -190,6 +191,7 @@ const ZipfileDumper = struct {
 
                 // TODO: check for ZIP64 format
                 var is_zip64 = false;
+                _ = is_zip64;
 
                 central_directory_cursor += 46;
                 central_directory_cursor += file_name_length;
@@ -326,12 +328,14 @@ const ZipfileDumper = struct {
     }
 
     fn dumpSegments(self: *Self) !void {
-        std.sort.insertionSort(Segment, self.segments.items, {}, segmentLessThan);
+        std.sort.insertion(Segment, self.segments.items, {}, segmentLessThan);
 
         var cursor: u64 = 0;
-        for (self.segments.items) |segment, i| {
-            if (i != 0) {
+        var first_segment = true;
+        for (self.segments.items) |segment| {
+            if (first_segment) {
                 try self.write("\n");
+                first_segment = false;
             }
 
             if (segment.offset > cursor) {
@@ -424,6 +428,7 @@ const ZipfileDumper = struct {
                 cursor += data_descriptor_cursor;
             }
         } else |err| {
+            _ = err catch {};
             // ok, so there's no optional data descriptor here
         }
 
@@ -548,7 +553,7 @@ const ZipfileDumper = struct {
         var cursor: u64 = 0;
         while (cursor < length) {
             const buffer_offset = offset + cursor;
-            try self.readNoEof(buffer_offset, buffer[0..std.math.min(buffer.len, length - cursor)]);
+            try self.readNoEof(buffer_offset, buffer[0..@min(buffer.len, length - cursor)]);
             try self.printIndentation();
             const row_start = offset + cursor - buffer_offset;
             {
@@ -659,7 +664,8 @@ const ZipfileDumper = struct {
 
     fn writeSectionHeader(self: *Self, offset: u64, comptime fmt: []const u8, args: anytype) !void {
         var offset_str_buf: [16]u8 = undefined;
-        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16, false, .{ .width = self.offset_padding, .fill = '0' })];
+        const offset_str = offset_str_buf[0..std.fmt.formatIntBuf(offset_str_buf[0..], offset, 16,
+                                                                  std.fmt.Case.lower, .{ .width = self.offset_padding, .fill = '0' })];
 
         try self.printIndentation();
         try self.printf(":0x{s} ; ", .{offset_str});
@@ -676,7 +682,7 @@ const ZipfileDumper = struct {
         name: []const u8,
     ) !void {
         comptime std.debug.assert(size <= max_size);
-        comptime const decimal_width_str = switch (max_size) {
+        const decimal_width_str = comptime switch (max_size) {
             2 => "5",
             4 => "10",
             8 => "20",
@@ -732,7 +738,8 @@ const ZipfileDumper = struct {
     }
 
     fn detectedMauCorruption(self: *Self, field_name: []const u8) void {
-        std.debug.warn("WARNING: detected Mac Archive Utility corruption in field: {s}\n", .{field_name});
+        _ = self;
+        std.debug.print("WARNING: detected Mac Archive Utility corruption in field: {s}\n", .{field_name});
     }
 
     fn indent(self: *Self) void {
