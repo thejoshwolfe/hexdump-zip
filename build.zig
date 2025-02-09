@@ -7,7 +7,7 @@ pub fn build(b: *Build) void {
     });
     const exe = b.addExecutable(.{
         .name = "hexdump-zip",
-        .root_source_file = .{ .path = "src/hexdump-zip.zig" },
+        .root_source_file = b.path("src/hexdump-zip.zig"),
         .target = target,
         .optimize = optimize,
     });
