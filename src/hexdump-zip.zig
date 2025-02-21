@@ -64,20 +64,28 @@ const Encoding = enum {
 
 const error_character = "\xef\xbf\xbd";
 
+const zip64_eocdr_size = 56;
+const zip64_eocdl_size = 20;
 const eocdr_size = 22;
-const eocdr_search_size: u64 = 0xffff + eocdr_size;
-
-/// end of central dir signature
-const eocdr_signature = 0x06054b50;
-
-/// central file header signature
-const cfh_signature = 0x02014b50;
+const eocdr_search_size: u64 = zip64_eocdl_size + 0xffff + eocdr_size;
 
 /// local file header signature
 const lfh_signature = 0x04034b50;
 
 /// optional data descriptor optional signature
 const oddo_signature = 0x08074b50;
+
+/// central file header signature
+const cfh_signature = 0x02014b50;
+
+/// zip64 end of central dir signature
+const zip64_eocdr_signature = 0x06064b50;
+
+/// zip64 end of central dir locator signature
+const zip64_eocdl_signature = 0x07064b50;
+
+/// end of central dir signature
+const eocdr_signature = 0x06054b50;
 
 const ZipfileDumper = struct {
     input_file: std.fs.File,
@@ -122,31 +130,52 @@ const ZipfileDumper = struct {
     fn findSegments(self: *Self) !void {
         // find the eocdr
         if (self.file_size < eocdr_size) return error.NotAZipFile;
+        // This buffer can contain:
+        //  * the zip64 end of central dir locator,
+        //  * the end of central directory record,
+        //  * and a 0xffff size zip file comment.
         var eocdr_search_buffer: [eocdr_search_size]u8 = undefined;
         const eocdr_search_slice = eocdr_search_buffer[0..@min(self.file_size, eocdr_search_size)];
-        try self.readNoEof(self.file_size - eocdr_search_slice.len, eocdr_search_slice);
+        const eocdr_search_slice_offset = self.file_size - eocdr_search_slice.len;
+        try self.readNoEof(eocdr_search_slice_offset, eocdr_search_slice);
         // seek backward over the comment looking for the signature
+        var eocdr_offset: u64 = undefined;
         var comment_length: u16 = 0;
-        var eocdr_buffer: []const u8 = undefined;
         while (true) : (comment_length += 1) {
-            const cursor = eocdr_search_slice.len - comment_length - eocdr_size;
-            if (readInt32(eocdr_search_slice, cursor) == eocdr_signature) {
+            eocdr_offset = self.file_size - (eocdr_size + comment_length);
+            if (readInt32(eocdr_search_slice, eocdr_offset - eocdr_search_slice_offset) == eocdr_signature) {
                 // found it
-                eocdr_buffer = eocdr_search_slice[cursor .. cursor + eocdr_size];
                 break;
             }
-            if (cursor == 0) return error.NotAZipFile;
+            if (eocdr_offset == 0 or comment_length == 0xffff) return error.NotAZipFile;
         }
-        const eocdr_offset = self.file_size - comment_length - eocdr_size;
+        const eocdr = eocdr_search_slice[eocdr_offset - eocdr_search_slice_offset .. eocdr_offset - eocdr_search_slice_offset + eocdr_size];
 
-        const disk_number = readInt16(eocdr_buffer, 4);
+        var disk_number: u32 = readInt16(eocdr, 4);
+        var entry_count: u32 = readInt16(eocdr, 10);
+        var size_of_central_directory: u64 = readInt32(eocdr, 12);
+        var central_directory_offset: u64 = readInt32(eocdr, 16);
+
+        // ZIP64
+        const is_zip64 = eocdr_offset >= zip64_eocdl_size and readInt32(eocdr_search_slice, eocdr_offset - zip64_eocdl_size - eocdr_search_slice_offset) == zip64_eocdl_signature;
+        if (is_zip64) {
+            const zip64_eocdl_offset = eocdr_offset - zip64_eocdl_size;
+            const zip64_eocdl = eocdr_search_slice[zip64_eocdl_offset - eocdr_search_slice_offset .. zip64_eocdl_offset + zip64_eocdl_size - eocdr_search_slice_offset];
+            const total_number_of_disks = readInt32(zip64_eocdl, 16);
+            if (total_number_of_disks != 1) return error.MultiDiskZipfileNotSupported;
+            const zip64_eocdr_offset = readInt64(zip64_eocdl, 8);
+
+            var zip64_eocdr_buffer: [zip64_eocdr_size]u8 = undefined;
+            try self.readNoEof(zip64_eocdr_offset, zip64_eocdr_buffer[0..]);
+            const zip64_eocdr = zip64_eocdr_buffer[0..];
+
+            disk_number = readInt32(zip64_eocdr, 16);
+            entry_count = readInt32(zip64_eocdr, 32);
+            size_of_central_directory = readInt64(zip64_eocdr, 40);
+            central_directory_offset = readInt64(zip64_eocdr, 48);
+        }
+
         if (disk_number != 0) return error.MultiDiskZipfileNotSupported;
-
-        const entry_count: u32 = readInt16(eocdr_buffer, 10);
-        //const size_of_central_directory: u64 = readInt32(eocdr_buffer, 12);
-        const central_directory_offset: u64 = readInt32(eocdr_buffer, 16);
-
-        // TODO: check for ZIP64 format
 
         var central_directory_cursor: u64 = central_directory_offset;
         {
@@ -155,16 +184,58 @@ const ZipfileDumper = struct {
                 var cfh_buffer: [46]u8 = undefined;
                 try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
 
-                const compressed_size: u64 = readInt32(&cfh_buffer, 20);
+                var compressed_size: u64 = readInt32(&cfh_buffer, 20);
+                var uncompressed_size: u64 = readInt32(&cfh_buffer, 24);
                 const file_name_length = readInt16(&cfh_buffer, 28);
                 const extra_fields_length = readInt16(&cfh_buffer, 30);
                 const file_comment_length = readInt16(&cfh_buffer, 32);
-                const local_header_offset: u64 = readInt32(&cfh_buffer, 42);
-
-                // TODO: check for ZIP64 format
+                var local_header_offset: u64 = readInt32(&cfh_buffer, 42);
 
                 central_directory_cursor += 46;
                 central_directory_cursor += file_name_length;
+
+                // ZIP64
+                var extra_fields_buffer: [0xffff]u8 = undefined;
+                const extra_fields = extra_fields_buffer[0..extra_fields_length];
+                try self.readNoEof(central_directory_cursor, extra_fields);
+                var extra_fields_cursor: u32 = 0;
+                while (extra_fields_cursor+3 < extra_fields_length) {
+                    const tag = readInt16(extra_fields, extra_fields_cursor);
+                    extra_fields_cursor += 2;
+                    const size = readInt16(extra_fields, extra_fields_cursor);
+                    extra_fields_cursor += 2;
+                    if (extra_fields_cursor + size > extra_fields_length) return error.ExtraFieldSizeExceedsExtraFieldsBuffer;
+                    const extra_field = extra_fields[extra_fields_cursor .. extra_fields_cursor + size];
+                    extra_fields_cursor += size;
+
+                    var found_zip64_extended_information = false;
+                    switch (tag) {
+                        0x0001 => {
+                            // ZIP64
+                            if (found_zip64_extended_information) return error.DuplicateZip64ExtendedInformation;
+                            found_zip64_extended_information = true;
+                            var cursor: u16 = 0;
+                            if (uncompressed_size == 0xffffffff) {
+                                if (cursor + 8 > extra_field.len) return error.Zip64ExtendedInformationTruncated;
+                                uncompressed_size = readInt64(extra_field, cursor);
+                                cursor += 8;
+                            }
+                            if (compressed_size == 0xffffffff) {
+                                if (cursor + 8 > extra_field.len) return error.Zip64ExtendedInformationTruncated;
+                                compressed_size = readInt64(extra_field, cursor);
+                                cursor += 8;
+                            }
+                            if (local_header_offset == 0xffffffff) {
+                                if (cursor + 8 > extra_field.len) return error.Zip64ExtendedInformationTruncated;
+                                local_header_offset = readInt64(extra_field, cursor);
+                                cursor += 8;
+                            }
+                            // ignore the disk number
+                        },
+                        else => {},
+                    }
+                }
+
                 central_directory_cursor += extra_fields_length;
                 central_directory_cursor += file_comment_length;
 
