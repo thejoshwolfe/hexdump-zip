@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 fn usage() !void {
     std.log.err("usage: INPUT.zip OUTPUT.hex", .{});
@@ -33,9 +34,11 @@ pub fn main() !void {
 
 const SegmentList = std.ArrayList(Segment);
 const SegmentKind = union(enum) {
-    LocalFile: LocalFileInfo,
-    CentralDirectoryEntries: CentralDirectoryEntriesInfo,
-    EndOfCentralDirectory: EndOfCentralDirectoryInfo,
+    local_file: LocalFileInfo,
+    central_directory_entries: CentralDirectoryEntriesInfo,
+    zip64_eocdr,
+    zip64_eocdl,
+    eocdr,
 };
 const Segment = struct {
     offset: u64,
@@ -46,20 +49,18 @@ const LocalFileInfo = struct {
     compressed_size: u64,
     is_zip64: bool,
 };
-const EndOfCentralDirectoryInfo = struct {
-    eocdr_offset: u64,
-};
 const CentralDirectoryEntriesInfo = struct {
     entry_count: u32,
+    central_directory_size: u64,
 };
 fn segmentLessThan(_: void, a: Segment, b: Segment) bool {
     return a.offset < b.offset;
 }
 
 const Encoding = enum {
-    None,
-    Cp437,
-    Utf8,
+    none,
+    cp437,
+    utf8,
 };
 
 const error_character = "\xef\xbf\xbd";
@@ -153,7 +154,7 @@ const ZipfileDumper = struct {
 
         var disk_number: u32 = readInt16(eocdr, 4);
         var entry_count: u32 = readInt16(eocdr, 10);
-        var size_of_central_directory: u64 = readInt32(eocdr, 12);
+        var central_directory_size: u64 = readInt32(eocdr, 12);
         var central_directory_offset: u64 = readInt32(eocdr, 16);
 
         // ZIP64
@@ -171,16 +172,28 @@ const ZipfileDumper = struct {
 
             disk_number = readInt32(zip64_eocdr, 16);
             entry_count = readInt32(zip64_eocdr, 32);
-            size_of_central_directory = readInt64(zip64_eocdr, 40);
+            central_directory_size = readInt64(zip64_eocdr, 40);
             central_directory_offset = readInt64(zip64_eocdr, 48);
+
+            try self.segments.append(Segment{
+                .offset = zip64_eocdr_offset,
+                .kind = .zip64_eocdr,
+            });
+            try self.segments.append(Segment{
+                .offset = zip64_eocdl_offset,
+                .kind = .zip64_eocdl,
+            });
         }
 
         if (disk_number != 0) return error.MultiDiskZipfileNotSupported;
+        const central_directory_end = central_directory_offset +| central_directory_size;
+        if (central_directory_end > self.file_size) return error.CentralDirectorySizeExceedsFileBounds;
 
         var central_directory_cursor: u64 = central_directory_offset;
         {
             var entry_index: u32 = 0;
-            while (entry_index < entry_count) : (entry_index += 1) {
+            while (entry_index < entry_count and central_directory_cursor + 46 <= central_directory_end) : (entry_index += 1) {
+                // TODO: generalize not exceeding the central_directory_size
                 var cfh_buffer: [46]u8 = undefined;
                 try self.readNoEof(central_directory_cursor, cfh_buffer[0..]);
 
@@ -199,7 +212,7 @@ const ZipfileDumper = struct {
                 const extra_fields = extra_fields_buffer[0..extra_fields_length];
                 try self.readNoEof(central_directory_cursor, extra_fields);
                 var extra_fields_cursor: u32 = 0;
-                while (extra_fields_cursor+3 < extra_fields_length) {
+                while (extra_fields_cursor + 3 < extra_fields_length) {
                     const tag = readInt16(extra_fields, extra_fields_cursor);
                     extra_fields_cursor += 2;
                     const size = readInt16(extra_fields, extra_fields_cursor);
@@ -241,13 +254,11 @@ const ZipfileDumper = struct {
 
                 try self.segments.append(Segment{
                     .offset = local_header_offset,
-                    .kind = SegmentKind{
-                        .LocalFile = LocalFileInfo{
-                            .entry_index = entry_index,
-                            .is_zip64 = false,
-                            .compressed_size = compressed_size,
-                        },
-                    },
+                    .kind = .{ .local_file = .{
+                        .entry_index = entry_index,
+                        .is_zip64 = false,
+                        .compressed_size = compressed_size,
+                    } },
                 });
             }
         }
@@ -255,17 +266,16 @@ const ZipfileDumper = struct {
         if (entry_count > 0) {
             try self.segments.append(Segment{
                 .offset = central_directory_offset,
-                .kind = SegmentKind{
-                    .CentralDirectoryEntries = CentralDirectoryEntriesInfo{ .entry_count = entry_count },
-                },
+                .kind = .{ .central_directory_entries = .{
+                    .entry_count = entry_count,
+                    .central_directory_size = central_directory_size,
+                } },
             });
         }
 
         try self.segments.append(Segment{
             .offset = eocdr_offset,
-            .kind = SegmentKind{
-                .EndOfCentralDirectory = EndOfCentralDirectoryInfo{ .eocdr_offset = eocdr_offset },
-            },
+            .kind = .eocdr,
         });
     }
 
@@ -280,7 +290,7 @@ const ZipfileDumper = struct {
 
             if (segment.offset > cursor) {
                 try self.writeSectionHeader(cursor, "Unused space", .{});
-                try self.dumpBlobContents(cursor, segment.offset - cursor, Encoding.None);
+                try self.dumpBlobContents(cursor, segment.offset - cursor, .none);
                 try self.write("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
@@ -289,9 +299,11 @@ const ZipfileDumper = struct {
             }
 
             const length = switch (segment.kind) {
-                SegmentKind.LocalFile => |info| try self.dumpLocalFile(segment.offset, info),
-                SegmentKind.CentralDirectoryEntries => |info| try self.dumpCentralDirectoryEntries(segment.offset, info),
-                SegmentKind.EndOfCentralDirectory => |info| try self.dumpEndOfCentralDirectory(segment.offset, info),
+                .local_file => |info| try self.dumpLocalFile(segment.offset, info),
+                .central_directory_entries => |info| try self.dumpCentralDirectoryEntries(segment.offset, info),
+                .zip64_eocdr => try self.dumpZip64EndOfCentralDirectoryRecord(segment.offset),
+                .zip64_eocdl => try self.dumpZip64EndOfCentralDirectoryLocator(segment.offset),
+                .eocdr => try self.dumpEndOfCentralDirectory(segment.offset),
             };
             cursor += length;
         }
@@ -334,7 +346,7 @@ const ZipfileDumper = struct {
             defer self.outdent();
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Name", .{});
-            try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
+            try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
@@ -342,14 +354,14 @@ const ZipfileDumper = struct {
             defer self.outdent();
             try self.write("\n");
             try self.writeSectionHeader(cursor, "Extra Fields", .{});
-            try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
+            try self.dumpBlobContents(cursor, extra_fields_length, .none);
             cursor += extra_fields_length;
         }
 
         if (info.compressed_size > 0) {
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Contents", .{});
-            try self.dumpBlobContents(cursor, info.compressed_size, Encoding.None);
+            try self.dumpBlobContents(cursor, info.compressed_size, .none);
             cursor += info.compressed_size;
         }
 
@@ -375,10 +387,12 @@ const ZipfileDumper = struct {
     }
 
     fn dumpCentralDirectoryEntries(self: *Self, offset: u64, info: CentralDirectoryEntriesInfo) !u64 {
+        const central_directory_end = offset + info.central_directory_size;
         var cursor = offset;
         {
             var i: u32 = 0;
-            while (i < info.entry_count) : (i += 1) {
+            while (i < info.entry_count and cursor + 46 <= central_directory_end) : (i += 1) {
+                // TODO: generalize not exceeding the central_directory_size
                 if (i > 0) try self.write("\n");
 
                 var cdr_buffer: [46]u8 = undefined;
@@ -420,21 +434,21 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File name", .{});
-                    try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) Encoding.Utf8 else Encoding.Cp437);
+                    try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
                     cursor += file_name_length;
                 }
                 if (extra_fields_length > 0) {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "Extra Fields", .{});
-                    try self.dumpBlobContents(cursor, extra_fields_length, Encoding.None);
+                    try self.dumpBlobContents(cursor, extra_fields_length, .none);
                     cursor += extra_fields_length;
                 }
                 if (file_comment_length > 0) {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File Comment", .{});
-                    try self.dumpBlobContents(cursor, file_comment_length, Encoding.Cp437);
+                    try self.dumpBlobContents(cursor, file_comment_length, .cp437);
                     cursor += file_comment_length;
                 }
             }
@@ -443,42 +457,80 @@ const ZipfileDumper = struct {
         return cursor - offset;
     }
 
-    fn dumpEndOfCentralDirectory(self: *Self, offset: u64, info: EndOfCentralDirectoryInfo) !u64 {
-        var total_length: u64 = 0;
-        if (offset != info.eocdr_offset) {
-            const zip64_eocdl_offset = info.eocdr_offset - 20;
-            try self.writeSectionHeader(offset, "Zip64 end of central directory record", .{});
+    fn dumpZip64EndOfCentralDirectoryRecord(self: *Self, offset: u64) !u64 {
+        var buffer: [56]u8 = undefined;
+        try self.readNoEof(offset, buffer[0..]);
+        var cursor: usize = 0;
 
-            try self.writeSectionHeader(zip64_eocdl_offset, "Zip64 end of central directory locator", .{});
+        const max_size = 8;
+        try self.writeSectionHeader(offset, "zip64 end of central directory record", .{});
+        try self.readStructField(&buffer, max_size, &cursor, 4, "zip64 end of central directory record signature");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "size of zip64 end of central directory record");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "version made by");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "version needed to extract");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "number of this disk");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "number of the disk with the start of the central directory");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "total number of entries in the central directory on this disk");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "total number of entries in the central directory");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "size of the central directory");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "offset of start of central directory with respect to the starting disk number");
+        assert(cursor == buffer.len);
 
-            total_length = info.eocdr_offset - offset;
-            @panic("TODO");
+        const zip64_extensible_data_sector_size = readInt64(&buffer, 4) -| 44;
+        if (zip64_extensible_data_sector_size > 0) {
+            self.indent();
+            defer self.outdent();
+            try self.writeSectionHeader(offset + cursor, "zip64 extensible data sector", .{});
+            try self.dumpBlobContents(offset + cursor, zip64_extensible_data_sector_size, .none);
+            cursor += zip64_extensible_data_sector_size;
         }
 
-        try self.writeSectionHeader(offset + total_length, "End of central directory record", .{});
-        var eocdr_buffer: [22]u8 = undefined;
-        try self.readNoEof(offset, eocdr_buffer[0..]);
-        var eocdr_cursor: usize = 0;
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "End of central directory signature");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Number of this disk");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Disk where central directory starts");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Number of central directory records on this disk");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Total number of central directory records");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "Size of central directory (bytes)");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 4, "Offset of start of central directory, relative to start of archive");
-        try self.readStructField(&eocdr_buffer, 4, &eocdr_cursor, 2, "Comment Length");
-        const comment_length = readInt16(&eocdr_buffer, 20);
-        total_length += 22;
+        return cursor;
+    }
 
+    fn dumpZip64EndOfCentralDirectoryLocator(self: *Self, offset: u64) !u64 {
+        var buffer: [20]u8 = undefined;
+        try self.readNoEof(offset, buffer[0..]);
+        var cursor: usize = 0;
+
+        const max_size = 8;
+        try self.writeSectionHeader(offset, "zip64 end of central directory locator", .{});
+        try self.readStructField(&buffer, max_size, &cursor, 4, "zip64 end of central dir locator signature");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "number of the disk with the start of the zip64 end of central directory");
+        try self.readStructField(&buffer, max_size, &cursor, 8, "relative offset of the zip64 end of central directory record");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "total number of disks");
+        assert(cursor == buffer.len);
+
+        return cursor;
+    }
+
+    fn dumpEndOfCentralDirectory(self: *Self, offset: u64) !u64 {
+        var buffer: [22]u8 = undefined;
+        try self.readNoEof(offset, buffer[0..]);
+        var cursor: usize = 0;
+
+        const max_size = 4;
+        try self.writeSectionHeader(offset, "End of central directory record", .{});
+        try self.readStructField(&buffer, max_size, &cursor, 4, "End of central directory signature");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "Number of this disk");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "Disk where central directory starts");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "Number of central directory records on this disk");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "Total number of central directory records");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "Size of central directory (bytes)");
+        try self.readStructField(&buffer, max_size, &cursor, 4, "Offset of start of central directory, relative to start of archive");
+        try self.readStructField(&buffer, max_size, &cursor, 2, "Comment Length");
+        assert(cursor == buffer.len);
+
+        const comment_length = readInt16(&buffer, 20);
         if (comment_length > 0) {
             self.indent();
             defer self.outdent();
-            try self.writeSectionHeader(offset + total_length, ".ZIP file comment", .{});
-            try self.dumpBlobContents(offset + total_length, comment_length, Encoding.Cp437);
-            total_length += comment_length;
+            try self.writeSectionHeader(offset + cursor, ".ZIP file comment", .{});
+            try self.dumpBlobContents(offset + cursor, comment_length, .cp437);
+            cursor += comment_length;
         }
 
-        return total_length;
+        return cursor;
     }
 
     fn dumpBlobContents(self: *Self, offset: u64, length: u64, encoding: Encoding) !void {
@@ -507,8 +559,8 @@ const ZipfileDumper = struct {
 
             var row = buffer[row_start .. offset + cursor - buffer_offset];
             switch (encoding) {
-                Encoding.None => {},
-                Encoding.Cp437 => {
+                .none => {},
+                .cp437 => {
                     if (length > row_length) {
                         var i: usize = row.len;
                         while (i < row_length) : (i += 1) {
@@ -521,7 +573,7 @@ const ZipfileDumper = struct {
                     }
                     try self.write("\"");
                 },
-                Encoding.Utf8 => {
+                .utf8 => {
                     if (length > row_length) {
                         var i: usize = row.len;
                         while (i < row_length) : (i += 1) {
@@ -669,7 +721,36 @@ const ZipfileDumper = struct {
                     name,
                 });
             },
-            8 => @panic("TODO"),
+            8 => {
+                const value = readInt64(buffer, cursor.*);
+                try self.printf( //
+                    "{x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{s}{s}{s}{s}{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>16}" ++ ("  " ** (max_size - size)) ++
+                    " ; {s}" ++
+                    "\n", .{
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    buffer[cursor.* + 2],
+                    buffer[cursor.* + 3],
+                    buffer[cursor.* + 4],
+                    buffer[cursor.* + 5],
+                    buffer[cursor.* + 6],
+                    buffer[cursor.* + 7],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
+                    cp437[buffer[cursor.* + 2]],
+                    cp437[buffer[cursor.* + 3]],
+                    cp437[buffer[cursor.* + 4]],
+                    cp437[buffer[cursor.* + 5]],
+                    cp437[buffer[cursor.* + 6]],
+                    cp437[buffer[cursor.* + 7]],
+                    value,
+                    value,
+                    name,
+                });
+            },
             else => unreachable,
         }
         cursor.* += size;
@@ -699,11 +780,6 @@ const ZipfileDumper = struct {
     fn readNoEof(self: *Self, offset: u64, buffer: []u8) !void {
         try self.input_file.seekTo(offset);
         try self.input_file.reader().readNoEof(buffer);
-    }
-    fn readByteAt(self: *Self, offset: u64) !u8 {
-        var buffer: [1]u8 = undefined;
-        try self.readNoEof(offset, buffer[0..]);
-        return buffer[0];
     }
     fn readInt32At(self: *Self, offset: u64) !u32 {
         var buffer: [4]u8 = undefined;
