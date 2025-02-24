@@ -208,6 +208,7 @@ const ZipfileDumper = struct {
                 central_directory_cursor += file_name_length;
 
                 // ZIP64
+                var found_zip64_extended_information = false;
                 var extra_fields_buffer: [0xffff]u8 = undefined;
                 const extra_fields = extra_fields_buffer[0..extra_fields_length];
                 try self.readNoEof(central_directory_cursor, extra_fields);
@@ -221,7 +222,6 @@ const ZipfileDumper = struct {
                     const extra_field = extra_fields[extra_fields_cursor .. extra_fields_cursor + size];
                     extra_fields_cursor += size;
 
-                    var found_zip64_extended_information = false;
                     switch (tag) {
                         0x0001 => {
                             // ZIP64
@@ -256,7 +256,7 @@ const ZipfileDumper = struct {
                     .offset = local_header_offset,
                     .kind = .{ .local_file = .{
                         .entry_index = entry_index,
-                        .is_zip64 = false,
+                        .is_zip64 = found_zip64_extended_information,
                         .compressed_size = compressed_size,
                     } },
                 });
@@ -366,17 +366,25 @@ const ZipfileDumper = struct {
         }
 
         // check for the optional data descriptor
-        var data_descriptor_buffer: [16]u8 = undefined;
-        if (self.readNoEof(cursor, data_descriptor_buffer[0..])) {
+        var data_descriptor_buffer: [24]u8 = undefined;
+        const data_descriptor_len: usize = if (info.is_zip64) 24 else 16;
+        if (self.readNoEof(cursor, data_descriptor_buffer[0..data_descriptor_len])) {
             if (readInt32(&data_descriptor_buffer, 0) == oddo_signature) {
                 // this is a data descriptor
                 try self.write("\n");
                 try self.writeSectionHeader(cursor, "Optional Data Descriptor", .{});
                 var data_descriptor_cursor: usize = 0;
-                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
-                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
-                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
-                try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
+                if (info.is_zip64) {
+                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 4, "crc-32");
+                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 8, "compressed size");
+                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 8, "uncompressed size");
+                } else {
+                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
+                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
+                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
+                }
                 cursor += data_descriptor_cursor;
             }
         } else |_| {
