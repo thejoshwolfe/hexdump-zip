@@ -289,8 +289,8 @@ const ZipfileDumper = struct {
             }
 
             if (segment.offset > cursor) {
-                try self.writeSectionHeader(cursor, "Unused space", .{});
-                try self.dumpBlobContents(cursor, segment.offset - cursor, .none);
+                try self.writeSectionHeader(cursor, "(unused space)", .{});
+                try self.dumpBlob(cursor, segment.offset - cursor, .none);
                 try self.write("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
@@ -346,7 +346,7 @@ const ZipfileDumper = struct {
             defer self.outdent();
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Name", .{});
-            try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
+            try self.dumpBlob(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
@@ -361,7 +361,7 @@ const ZipfileDumper = struct {
         if (info.compressed_size > 0) {
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Contents", .{});
-            try self.dumpBlobContents(cursor, info.compressed_size, .none);
+            try self.dumpBlob(cursor, info.compressed_size, .none);
             cursor += info.compressed_size;
         }
 
@@ -442,7 +442,7 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File name", .{});
-                    try self.dumpBlobContents(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
+                    try self.dumpBlob(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
                     cursor += file_name_length;
                 }
                 if (extra_fields_length > 0) {
@@ -456,7 +456,7 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File Comment", .{});
-                    try self.dumpBlobContents(cursor, file_comment_length, .cp437);
+                    try self.dumpBlob(cursor, file_comment_length, .cp437);
                     cursor += file_comment_length;
                 }
             }
@@ -489,7 +489,7 @@ const ZipfileDumper = struct {
             self.indent();
             defer self.outdent();
             try self.writeSectionHeader(offset + cursor, "zip64 extensible data sector", .{});
-            try self.dumpBlobContents(offset + cursor, zip64_extensible_data_sector_size, .none);
+            try self.dumpBlob(offset + cursor, zip64_extensible_data_sector_size, .none);
             cursor += zip64_extensible_data_sector_size;
         }
 
@@ -534,7 +534,7 @@ const ZipfileDumper = struct {
             self.indent();
             defer self.outdent();
             try self.writeSectionHeader(offset + cursor, ".ZIP file comment", .{});
-            try self.dumpBlobContents(offset + cursor, comment_length, .cp437);
+            try self.dumpBlob(offset + cursor, comment_length, .cp437);
             cursor += comment_length;
         }
 
@@ -548,7 +548,7 @@ const ZipfileDumper = struct {
         bytes_remaining: u2 = 0,
     };
 
-    fn dumpBlobContents(self: *Self, offset: u64, length: u64, encoding: Encoding) !void {
+    fn dumpBlob(self: *Self, offset: u64, length: u64, encoding: Encoding) !void {
         var partial_utf8_state = PartialUtf8State{};
         var cursor: u64 = 0;
         while (cursor < length) {
@@ -558,17 +558,21 @@ const ZipfileDumper = struct {
             try self.readNoEof(buffer_offset, buffer[0..buffer_len]);
             const is_end = cursor + buffer_len == length;
 
-            try self.dumpBlobBuffer(buffer[0..buffer_len], cursor == 0, is_end, encoding, &partial_utf8_state);
+            try self.writeBlobPart(buffer[0..buffer_len], cursor == 0, is_end, encoding, &partial_utf8_state);
 
             cursor += buffer_len;
         }
     }
 
-    fn dumpBlobBuffer(self: *Self, buffer: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+    fn writeBlob(self: *Self, buffer: []const u8, encoding: Encoding) !void {
+        var partial_utf8_state = PartialUtf8State{};
+        try self.writeBlobPart(buffer, true, true, encoding, &partial_utf8_state);
+    }
+    fn writeBlobPart(self: *Self, buffer: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
         var cursor: usize = 0;
         while (cursor < buffer.len) : (cursor += row_length) {
             const row_end = @min(cursor + row_length, buffer.len);
-            try self.dumpBlobRow(
+            try self.writeBlobRow(
                 buffer[cursor..row_end],
                 is_beginning and cursor == 0,
                 is_end and row_end == buffer.len,
@@ -578,7 +582,7 @@ const ZipfileDumper = struct {
         }
     }
 
-    fn dumpBlobRow(self: *Self, row: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+    fn writeBlobRow(self: *Self, row: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
         assert(row.len > 0);
 
         try self.printIndentation();
@@ -811,9 +815,18 @@ const ZipfileDumper = struct {
             switch (extra_field.tag) {
                 //0x0001 => {},
                 else => {
-                    try self.dumpBlobBuffer(extra_field.entire_buffer[4..], true, true, .none, undefined);
+                    try self.writeBlob(extra_field.entire_buffer[4..], .none);
                 },
             }
+        }
+
+        const padding = it.trailingPadding();
+        if (padding.len > 0) {
+            const section_offset = offset + @as(u64, @intCast(padding.ptr - buffer.ptr));
+            try self.writeSectionHeader(section_offset, "(unused space)", .{});
+            self.indent();
+            defer self.outdent();
+            try self.writeBlob(padding, .none);
         }
     }
 
