@@ -354,7 +354,7 @@ const ZipfileDumper = struct {
             defer self.outdent();
             try self.write("\n");
             try self.writeSectionHeader(cursor, "Extra Fields", .{});
-            try self.dumpBlobContents(cursor, extra_fields_length, .none);
+            try self.readExtraFields(cursor, extra_fields_length);
             cursor += extra_fields_length;
         }
 
@@ -449,7 +449,7 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "Extra Fields", .{});
-                    try self.dumpBlobContents(cursor, extra_fields_length, .none);
+                    try self.readExtraFields(cursor, extra_fields_length);
                     cursor += extra_fields_length;
                 }
                 if (file_comment_length > 0) {
@@ -541,103 +541,130 @@ const ZipfileDumper = struct {
         return cursor;
     }
 
+    const row_length = 16;
+    const PartialUtf8State = struct {
+        codepoint: [4]u8 = undefined,
+        bytes_saved: u2 = 0,
+        bytes_remaining: u2 = 0,
+    };
+
     fn dumpBlobContents(self: *Self, offset: u64, length: u64, encoding: Encoding) !void {
-        var buffer: [0x1000]u8 = undefined;
-        const row_length = 16;
-
-        var utf8_byte_sequence_buffer: [4]u8 = undefined;
-        var utf8_bytes_saved: usize = 0;
-        var utf8_bytes_remaining: usize = 0;
-
+        var partial_utf8_state = PartialUtf8State{};
         var cursor: u64 = 0;
         while (cursor < length) {
+            var buffer: [0x1000]u8 = undefined;
             const buffer_offset = offset + cursor;
-            try self.readNoEof(buffer_offset, buffer[0..@min(buffer.len, length - cursor)]);
-            try self.printIndentation();
-            const row_start = offset + cursor - buffer_offset;
-            {
-                var i: usize = 0;
-                while (i < row_length - 1 and cursor < length - 1) : (i += 1) {
-                    try self.printf("{x:0>2} ", .{buffer[offset + cursor - buffer_offset]});
-                    cursor += 1;
-                }
-            }
-            try self.printf("{x:0>2}", .{buffer[offset + cursor - buffer_offset]});
-            cursor += 1;
+            const buffer_len = @min(buffer.len, length - cursor);
+            try self.readNoEof(buffer_offset, buffer[0..buffer_len]);
+            const is_end = cursor + buffer_len == length;
 
-            var row = buffer[row_start .. offset + cursor - buffer_offset];
-            switch (encoding) {
-                .none => {},
-                .cp437 => {
-                    if (length > row_length) {
-                        var i: usize = row.len;
-                        while (i < row_length) : (i += 1) {
-                            try self.write("   ");
-                        }
-                    }
-                    try self.write(" ; cp437\"");
-                    for (row) |c| {
-                        try self.write(cp437[c]);
-                    }
-                    try self.write("\"");
-                },
-                .utf8 => {
-                    if (length > row_length) {
-                        var i: usize = row.len;
-                        while (i < row_length) : (i += 1) {
-                            try self.write("   ");
-                        }
-                    }
-                    try self.write(" ; utf8\"");
+            try self.dumpBlobBuffer(buffer[0..buffer_len], cursor == 0, is_end, encoding, &partial_utf8_state);
 
-                    // input is utf8; output is utf8.
-                    var i: usize = 0;
-                    if (utf8_bytes_remaining > 0) {
-                        while (i < utf8_bytes_remaining) : (i += 1) {
-                            utf8_byte_sequence_buffer[utf8_bytes_saved + i] = row[i];
-                        }
-                        try self.dumpUtf8Codepoint(utf8_byte_sequence_buffer[0 .. utf8_bytes_saved + utf8_bytes_remaining]);
-                        utf8_bytes_saved = 0;
-                        utf8_bytes_remaining = 0;
-                    }
-
-                    while (i < row.len) : (i += 1) {
-                        const utf8_length = std.unicode.utf8ByteSequenceLength(row[i]) catch {
-                            // invalid utf8 start byte. replace with the error character.
-                            try self.write(error_character);
-                            continue;
-                        };
-
-                        if (i + utf8_length > row.len) {
-                            // this sequence wraps onto the next line.
-                            if (i + utf8_length - row.len > length - cursor) {
-                                // there is no next line. unexpected eof.
-                                try self.write(error_character);
-                                break;
-                            }
-                            var j: usize = 0;
-                            while (j < row.len - i) : (j += 1) {
-                                utf8_byte_sequence_buffer[j] = row[i + j];
-                            }
-                            utf8_bytes_saved = j;
-                            utf8_bytes_remaining = utf8_length - j;
-                            break;
-                        }
-
-                        // we have a complete codepoint on this row
-                        try self.dumpUtf8Codepoint(row[i .. i + utf8_length]);
-                        i += utf8_length - 1;
-                    }
-                    try self.write("\"");
-                },
-            }
-            try self.write("\n");
+            cursor += buffer_len;
         }
     }
 
-    fn dumpUtf8Codepoint(self: *Self, byte_sequence: []const u8) !void {
+    fn dumpBlobBuffer(self: *Self, buffer: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+        var cursor: usize = 0;
+        while (cursor < buffer.len) : (cursor += row_length) {
+            const row_end = @min(cursor + row_length, buffer.len);
+            try self.dumpBlobRow(
+                buffer[cursor..row_end],
+                is_beginning and cursor == 0,
+                is_end and row_end == buffer.len,
+                encoding,
+                partial_utf8_state,
+            );
+        }
+    }
+
+    fn dumpBlobRow(self: *Self, row: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+        assert(row.len > 0);
+
+        try self.printIndentation();
+
+        // Hex representation.
+        for (row, 0..) |b, i| {
+            if (i > 0) try self.write(" ");
+            try self.printf("{x:0>2}", .{b});
+        }
+
+        if (!is_beginning and encoding != .none) {
+            // Fill out the end of the last row with spaces.
+            var i: usize = row.len;
+            while (i < row_length) : (i += 1) {
+                assert(is_end);
+                try self.write("   ");
+            }
+        }
+        switch (encoding) {
+            .none => {},
+            .cp437 => {
+                try self.write(" ; cp437\"");
+                for (row) |c| {
+                    switch (c) {
+                        '"', '\\' => {
+                            const content = [2]u8{ '\\', c };
+                            try self.write(&content);
+                        },
+                        else => {
+                            try self.write(cp437[c]);
+                        },
+                    }
+                }
+                try self.write("\"");
+            },
+            .utf8 => {
+                try self.write(" ; utf8\"");
+
+                // Input is utf8; output is utf8.
+                var i: usize = 0;
+                if (partial_utf8_state.bytes_remaining > 0) {
+                    // Finish writing partial codepoint.
+                    while (i < partial_utf8_state.bytes_remaining) : (i += 1) {
+                        partial_utf8_state.codepoint[partial_utf8_state.bytes_saved + i] = row[i];
+                    }
+                    try self.writeEscapedCodepoint(partial_utf8_state.codepoint[0 .. partial_utf8_state.bytes_saved + partial_utf8_state.bytes_remaining]);
+                    partial_utf8_state.bytes_saved = 0;
+                    partial_utf8_state.bytes_remaining = 0;
+                }
+
+                while (i < row.len) : (i += 1) {
+                    const utf8_length = std.unicode.utf8ByteSequenceLength(row[i]) catch {
+                        // Invalid utf8 start byte.
+                        try self.write(error_character);
+                        continue;
+                    };
+
+                    if (i + utf8_length > row.len) {
+                        // Save partial codepoint for next row.
+                        if (is_end) {
+                            // There is no next row.
+                            try self.write(error_character);
+                            break;
+                        }
+                        var j: usize = 0;
+                        while (j < row.len - i) : (j += 1) {
+                            partial_utf8_state.codepoint[j] = row[i + j];
+                        }
+                        partial_utf8_state.bytes_saved = @intCast(j);
+                        partial_utf8_state.bytes_remaining = @intCast(utf8_length - j);
+                        break;
+                    }
+
+                    // We have a complete codepoint on this row.
+                    try self.writeEscapedCodepoint(row[i .. i + utf8_length]);
+                    i += utf8_length - 1;
+                }
+                try self.write("\"");
+            },
+        }
+        try self.write("\n");
+    }
+
+    fn writeEscapedCodepoint(self: *Self, byte_sequence: []const u8) !void {
         const codepoint = std.unicode.utf8Decode(byte_sequence) catch {
-            // invalid utf8 seequcne becomes a single error character.
+            // invalid utf8 sequence becomes a single error character.
             return self.write(error_character);
         };
         // some special escapes
@@ -763,6 +790,56 @@ const ZipfileDumper = struct {
         }
         cursor.* += size;
     }
+
+    fn readExtraFields(self: *Self, offset: u64, extra_fields_length: u16) !void {
+        var buf: [0xffff]u8 = undefined;
+        const buffer = buf[0..extra_fields_length];
+        try self.readNoEof(offset, buffer);
+        var it = ExtraFieldIterator{ .extra_fields = buffer };
+
+        while (try it.next()) |extra_field| {
+            const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
+            switch (extra_field.tag) {
+                0x0001 => try self.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag}),
+                else => try self.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag}),
+            }
+            self.indent();
+            defer self.outdent();
+            var cursor: usize = 0;
+            try self.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Tag");
+            try self.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Size");
+            switch (extra_field.tag) {
+                //0x0001 => {},
+                else => {
+                    try self.dumpBlobBuffer(extra_field.entire_buffer[4..], true, true, .none, undefined);
+                },
+            }
+        }
+    }
+
+    const ExtraFieldIterator = struct {
+        extra_fields: []const u8,
+        cursor: u16 = 0,
+        pub fn next(self: *@This()) !?ExtraField {
+            if (self.cursor >= self.extra_fields.len -| 3) return null;
+            const tag = readInt16(self.extra_fields, self.cursor);
+            const size = readInt16(self.extra_fields, self.cursor + 2);
+            if (self.cursor + 4 > self.extra_fields.len -| size) return error.ExtraFieldSizeExceedsExtraFieldsBuffer;
+            const entire_buffer = self.extra_fields[self.cursor .. self.cursor + 4 + size];
+            self.cursor += 4 + size;
+            return .{
+                .tag = tag,
+                .entire_buffer = entire_buffer,
+            };
+        }
+        pub fn trailingPadding(self: @This()) []const u8 {
+            return self.extra_fields[self.cursor..];
+        }
+    };
+    const ExtraField = struct {
+        tag: u16,
+        entire_buffer: []const u8,
+    };
 
     fn indent(self: *Self) void {
         self.indentation += 1;
