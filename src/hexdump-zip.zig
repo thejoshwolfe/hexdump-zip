@@ -57,12 +57,6 @@ fn segmentLessThan(_: void, a: Segment, b: Segment) bool {
     return a.offset < b.offset;
 }
 
-const Encoding = enum {
-    none,
-    cp437,
-    utf8,
-};
-
 const error_character = "\xef\xbf\xbd";
 
 const zip64_eocdr_size = 56;
@@ -290,7 +284,7 @@ const ZipfileDumper = struct {
 
             if (segment.offset > cursor) {
                 try self.writeSectionHeader(cursor, "(unused space)", .{});
-                try self.dumpBlob(cursor, segment.offset - cursor, .none);
+                try self.dumpBlob(cursor, segment.offset - cursor, .{});
                 try self.write("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
@@ -346,7 +340,7 @@ const ZipfileDumper = struct {
             defer self.outdent();
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Name", .{});
-            try self.dumpBlob(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
+            try self.dumpBlob(cursor, file_name_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
@@ -361,7 +355,10 @@ const ZipfileDumper = struct {
         if (info.compressed_size > 0) {
             try self.write("\n");
             try self.writeSectionHeader(cursor, "File Contents", .{});
-            try self.dumpBlob(cursor, info.compressed_size, .none);
+            try self.dumpBlob(cursor, info.compressed_size, .{
+                .row_length = 512,
+                .spaces = false,
+            });
             cursor += info.compressed_size;
         }
 
@@ -375,12 +372,12 @@ const ZipfileDumper = struct {
                 try self.writeSectionHeader(cursor, "Optional Data Descriptor", .{});
                 var data_descriptor_cursor: usize = 0;
                 if (info.is_zip64) {
-                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                    try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 4, "optional data descriptor optional signature");
                     try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 4, "crc-32");
                     try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 8, "compressed size");
                     try self.readStructField(&data_descriptor_buffer, 8, &data_descriptor_cursor, 8, "uncompressed size");
                 } else {
-                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor signature");
+                    try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "optional data descriptor optional signature");
                     try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "crc-32");
                     try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "compressed size");
                     try self.readStructField(&data_descriptor_buffer, 4, &data_descriptor_cursor, 4, "uncompressed size");
@@ -442,7 +439,7 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File name", .{});
-                    try self.dumpBlob(cursor, file_name_length, if (is_utf8) .utf8 else .cp437);
+                    try self.dumpBlob(cursor, file_name_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
                     cursor += file_name_length;
                 }
                 if (extra_fields_length > 0) {
@@ -456,7 +453,7 @@ const ZipfileDumper = struct {
                     self.indent();
                     defer self.outdent();
                     try self.writeSectionHeader(cursor, "File Comment", .{});
-                    try self.dumpBlob(cursor, file_comment_length, .cp437);
+                    try self.dumpBlob(cursor, file_comment_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
                     cursor += file_comment_length;
                 }
             }
@@ -489,7 +486,7 @@ const ZipfileDumper = struct {
             self.indent();
             defer self.outdent();
             try self.writeSectionHeader(offset + cursor, "zip64 extensible data sector", .{});
-            try self.dumpBlob(offset + cursor, zip64_extensible_data_sector_size, .none);
+            try self.dumpBlob(offset + cursor, zip64_extensible_data_sector_size, .{});
             cursor += zip64_extensible_data_sector_size;
         }
 
@@ -534,21 +531,29 @@ const ZipfileDumper = struct {
             self.indent();
             defer self.outdent();
             try self.writeSectionHeader(offset + cursor, ".ZIP file comment", .{});
-            try self.dumpBlob(offset + cursor, comment_length, .cp437);
+            try self.dumpBlob(offset + cursor, comment_length, .{ .encoding = .cp437 });
             cursor += comment_length;
         }
 
         return cursor;
     }
 
-    const row_length = 16;
     const PartialUtf8State = struct {
         codepoint: [4]u8 = undefined,
         bytes_saved: u2 = 0,
         bytes_remaining: u2 = 0,
     };
+    const BlobConfig = struct {
+        row_length: u16 = 16,
+        spaces: bool = true,
+        encoding: enum {
+            none,
+            cp437,
+            utf8,
+        } = .none,
+    };
 
-    fn dumpBlob(self: *Self, offset: u64, length: u64, encoding: Encoding) !void {
+    fn dumpBlob(self: *Self, offset: u64, length: u64, config: BlobConfig) !void {
         var partial_utf8_state = PartialUtf8State{};
         var cursor: u64 = 0;
         while (cursor < length) {
@@ -558,50 +563,50 @@ const ZipfileDumper = struct {
             try self.readNoEof(buffer_offset, buffer[0..buffer_len]);
             const is_end = cursor + buffer_len == length;
 
-            try self.writeBlobPart(buffer[0..buffer_len], cursor == 0, is_end, encoding, &partial_utf8_state);
+            try self.writeBlobPart(buffer[0..buffer_len], config, cursor == 0, is_end, &partial_utf8_state);
 
             cursor += buffer_len;
         }
     }
 
-    fn writeBlob(self: *Self, buffer: []const u8, encoding: Encoding) !void {
+    fn writeBlob(self: *Self, buffer: []const u8, config: BlobConfig) !void {
         var partial_utf8_state = PartialUtf8State{};
-        try self.writeBlobPart(buffer, true, true, encoding, &partial_utf8_state);
+        try self.writeBlobPart(buffer, config, true, true, &partial_utf8_state);
     }
-    fn writeBlobPart(self: *Self, buffer: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+    fn writeBlobPart(self: *Self, buffer: []const u8, config: BlobConfig, is_beginning: bool, is_end: bool, partial_utf8_state: *PartialUtf8State) !void {
         var cursor: usize = 0;
-        while (cursor < buffer.len) : (cursor += row_length) {
-            const row_end = @min(cursor + row_length, buffer.len);
+        while (cursor < buffer.len) : (cursor += config.row_length) {
+            const row_end = @min(cursor + config.row_length, buffer.len);
             try self.writeBlobRow(
                 buffer[cursor..row_end],
+                config,
                 is_beginning and cursor == 0,
                 is_end and row_end == buffer.len,
-                encoding,
                 partial_utf8_state,
             );
         }
     }
 
-    fn writeBlobRow(self: *Self, row: []const u8, is_beginning: bool, is_end: bool, encoding: Encoding, partial_utf8_state: *PartialUtf8State) !void {
+    fn writeBlobRow(self: *Self, row: []const u8, config: BlobConfig, is_beginning: bool, is_end: bool, partial_utf8_state: *PartialUtf8State) !void {
         assert(row.len > 0);
 
         try self.printIndentation();
 
         // Hex representation.
         for (row, 0..) |b, i| {
-            if (i > 0) try self.write(" ");
+            if (config.spaces and i > 0) try self.write(" ");
             try self.printf("{x:0>2}", .{b});
         }
 
-        if (!is_beginning and encoding != .none) {
+        if (!is_beginning and config.encoding != .none) {
             // Fill out the end of the last row with spaces.
             var i: usize = row.len;
-            while (i < row_length) : (i += 1) {
+            while (i < config.row_length) : (i += 1) {
                 assert(is_end);
                 try self.write("   ");
             }
         }
-        switch (encoding) {
+        switch (config.encoding) {
             .none => {},
             .cp437 => {
                 try self.write(" ; cp437\"");
@@ -815,7 +820,7 @@ const ZipfileDumper = struct {
             switch (extra_field.tag) {
                 //0x0001 => {},
                 else => {
-                    try self.writeBlob(extra_field.entire_buffer[4..], .none);
+                    try self.writeBlob(extra_field.entire_buffer[4..], .{});
                 },
             }
         }
@@ -826,7 +831,7 @@ const ZipfileDumper = struct {
             try self.writeSectionHeader(section_offset, "(unused space)", .{});
             self.indent();
             defer self.outdent();
-            try self.writeBlob(padding, .none);
+            try self.writeBlob(padding, .{});
         }
     }
 
