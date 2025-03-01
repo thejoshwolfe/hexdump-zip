@@ -284,12 +284,15 @@ const ZipfileDumper = struct {
 
             if (segment.offset > cursor) {
                 try self.writeSectionHeader(cursor, "(unused space)", .{});
-                try self.dumpBlob(cursor, segment.offset - cursor, .{});
+                try self.dumpBlob(cursor, segment.offset - cursor, .{
+                    .row_length = 512,
+                    .spaces = false,
+                });
                 try self.write("\n");
                 cursor = segment.offset;
             } else if (segment.offset < cursor) {
+                try self.printf("#seek -0x{x}\n\n", .{cursor - segment.offset});
                 cursor = segment.offset;
-                @panic("TODO: overlapping regions");
             }
 
             const length = switch (segment.kind) {
