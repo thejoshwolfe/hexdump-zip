@@ -1,38 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-fn usage() !void {
-    std.log.err("usage: INPUT.zip OUTPUT.hex", .{});
-    return error.Usage;
-}
-
-pub fn main() !void {
-    var gpa_instance: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa_instance.deinit();
-    const gpa = gpa_instance.allocator();
-
-    var args = try std.process.argsWithAllocator(gpa);
-    defer args.deinit();
-    _ = args.next() orelse return usage();
-    const input_path_str = args.next() orelse return usage();
-    const output_path_str = args.next() orelse return usage();
-    if (args.next() != null) return usage();
-
-    var input_file = try std.fs.cwd().openFile(input_path_str, .{});
-    defer input_file.close();
-
-    var output_file = try std.fs.cwd().createFile(output_path_str, .{});
-    defer output_file.close();
-
-    var dumper: StreamingDumper = .{
-        .input_file = input_file,
-        .output_file = output_file,
-    };
-    try dumper.doIt();
-
-    return std.process.cleanExit();
-}
-
 const error_character = "\xef\xbf\xbd";
 
 const zip64_eocdr_size = 56;
@@ -59,7 +27,7 @@ const zip64_eocdl_signature = 0x07064b50;
 /// end of central dir signature
 const eocdr_signature = 0x06054b50;
 
-const StreamingDumper = struct {
+pub const StreamingDumper = struct {
     input_file: std.fs.File,
     input: @TypeOf(std.io.bufferedReader(@as(std.fs.File.Reader, undefined))) = undefined,
     output_file: std.fs.File,

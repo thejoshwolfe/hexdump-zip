@@ -1,37 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-fn usage() !void {
-    std.log.err("usage: INPUT.zip OUTPUT.hex", .{});
-    return error.Usage;
-}
-
-pub fn main() !void {
-    var gpa_instance: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa_instance.deinit();
-    const gpa = gpa_instance.allocator();
-
-    var args = try std.process.argsWithAllocator(gpa);
-    defer args.deinit();
-    _ = args.next() orelse return usage();
-    const input_path_str = args.next() orelse return usage();
-    const output_path_str = args.next() orelse return usage();
-    if (args.next() != null) return usage();
-
-    var input_file = try std.fs.cwd().openFile(input_path_str, .{});
-    defer input_file.close();
-
-    var output_file = try std.fs.cwd().createFile(output_path_str, .{});
-    defer output_file.close();
-
-    var zipfile_dumper: ZipfileDumper = undefined;
-    try zipfile_dumper.init(input_file, output_file, gpa);
-    defer zipfile_dumper.deinit();
-    try zipfile_dumper.doIt();
-
-    return std.process.cleanExit();
-}
-
 const SegmentList = std.ArrayList(Segment);
 const SegmentKind = union(enum) {
     local_file: LocalFileInfo,
@@ -82,7 +51,7 @@ const zip64_eocdl_signature = 0x07064b50;
 /// end of central dir signature
 const eocdr_signature = 0x06054b50;
 
-const ZipfileDumper = struct {
+pub const ZipfileDumper = struct {
     input_file: std.fs.File,
     file_size: u64,
     offset_padding: usize,
