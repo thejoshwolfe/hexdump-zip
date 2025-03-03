@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const Hexdumper = @import("./Hexdumper.zig");
+const z = @import("./zipfile.zig");
 
 const SegmentList = std.ArrayList(Segment);
 const SegmentKind = union(enum) {
@@ -27,29 +28,6 @@ const CentralDirectoryEntriesInfo = struct {
 fn segmentLessThan(_: void, a: Segment, b: Segment) bool {
     return a.offset < b.offset;
 }
-
-const zip64_eocdr_size = 56;
-const zip64_eocdl_size = 20;
-const eocdr_size = 22;
-const eocdr_search_size: u64 = zip64_eocdl_size + 0xffff + eocdr_size;
-
-/// local file header signature
-const lfh_signature = 0x04034b50;
-
-/// optional data descriptor optional signature
-const oddo_signature = 0x08074b50;
-
-/// central file header signature
-const cfh_signature = 0x02014b50;
-
-/// zip64 end of central dir signature
-const zip64_eocdr_signature = 0x06064b50;
-
-/// zip64 end of central dir locator signature
-const zip64_eocdl_signature = 0x07064b50;
-
-/// end of central dir signature
-const eocdr_signature = 0x06054b50;
 
 pub const ZipfileDumper = struct {
     input_file: std.fs.File,
@@ -90,27 +68,27 @@ pub const ZipfileDumper = struct {
 
     fn findSegments(self: *Self) !void {
         // find the eocdr
-        if (self.file_size < eocdr_size) return error.NotAZipFile;
+        if (self.file_size < z.eocdr_size) return error.NotAZipFile;
         // This buffer can contain:
         //  * the zip64 end of central dir locator,
         //  * the end of central directory record,
         //  * and a 0xffff size zip file comment.
-        var eocdr_search_buffer: [eocdr_search_size]u8 = undefined;
-        const eocdr_search_slice = eocdr_search_buffer[0..@min(self.file_size, eocdr_search_size)];
+        var eocdr_search_buffer: [z.eocdr_search_size]u8 = undefined;
+        const eocdr_search_slice = eocdr_search_buffer[0..@min(self.file_size, z.eocdr_search_size)];
         const eocdr_search_slice_offset = self.file_size - eocdr_search_slice.len;
         try self.readNoEof(eocdr_search_slice_offset, eocdr_search_slice);
         // seek backward over the comment looking for the signature
         var eocdr_offset: u64 = undefined;
         var comment_length: u16 = 0;
         while (true) : (comment_length += 1) {
-            eocdr_offset = self.file_size - (eocdr_size + comment_length);
-            if (readInt32(eocdr_search_slice, eocdr_offset - eocdr_search_slice_offset) == eocdr_signature) {
+            eocdr_offset = self.file_size - (z.eocdr_size + comment_length);
+            if (readInt32(eocdr_search_slice, eocdr_offset - eocdr_search_slice_offset) == z.eocdr_signature) {
                 // found it
                 break;
             }
             if (eocdr_offset == 0 or comment_length == 0xffff) return error.NotAZipFile;
         }
-        const eocdr = eocdr_search_slice[eocdr_offset - eocdr_search_slice_offset .. eocdr_offset - eocdr_search_slice_offset + eocdr_size];
+        const eocdr = eocdr_search_slice[eocdr_offset - eocdr_search_slice_offset .. eocdr_offset - eocdr_search_slice_offset + z.eocdr_size];
 
         var disk_number: u32 = readInt16(eocdr, 4);
         var entry_count: u32 = readInt16(eocdr, 10);
@@ -118,15 +96,15 @@ pub const ZipfileDumper = struct {
         var central_directory_offset: u64 = readInt32(eocdr, 16);
 
         // ZIP64
-        const is_zip64 = eocdr_offset >= zip64_eocdl_size and readInt32(eocdr_search_slice, eocdr_offset - zip64_eocdl_size - eocdr_search_slice_offset) == zip64_eocdl_signature;
+        const is_zip64 = eocdr_offset >= z.zip64_eocdl_size and readInt32(eocdr_search_slice, eocdr_offset - z.zip64_eocdl_size - eocdr_search_slice_offset) == z.zip64_eocdl_signature;
         if (is_zip64) {
-            const zip64_eocdl_offset = eocdr_offset - zip64_eocdl_size;
-            const zip64_eocdl = eocdr_search_slice[zip64_eocdl_offset - eocdr_search_slice_offset .. zip64_eocdl_offset + zip64_eocdl_size - eocdr_search_slice_offset];
+            const zip64_eocdl_offset = eocdr_offset - z.zip64_eocdl_size;
+            const zip64_eocdl = eocdr_search_slice[zip64_eocdl_offset - eocdr_search_slice_offset .. zip64_eocdl_offset + z.zip64_eocdl_size - eocdr_search_slice_offset];
             const total_number_of_disks = readInt32(zip64_eocdl, 16);
             if (total_number_of_disks != 1) return error.MultiDiskZipfileNotSupported;
             const zip64_eocdr_offset = readInt64(zip64_eocdl, 8);
 
-            var zip64_eocdr_buffer: [zip64_eocdr_size]u8 = undefined;
+            var zip64_eocdr_buffer: [z.zip64_eocdr_size]u8 = undefined;
             try self.readNoEof(zip64_eocdr_offset, zip64_eocdr_buffer[0..]);
             const zip64_eocdr = zip64_eocdr_buffer[0..];
 
@@ -276,7 +254,7 @@ pub const ZipfileDumper = struct {
         var cursor = offset;
         var lfh_buffer: [30]u8 = undefined;
         try self.readNoEof(cursor, lfh_buffer[0..]);
-        if (readInt32(&lfh_buffer, 0) != lfh_signature) {
+        if (readInt32(&lfh_buffer, 0) != z.lfh_signature) {
             try self.dumper.writeSectionHeader(offset, "WARNING: invalid local file header signature", .{});
             try self.dumper.write("\n");
             // if this isn't a local file, idk what it is.
@@ -335,7 +313,7 @@ pub const ZipfileDumper = struct {
         var data_descriptor_buffer: [24]u8 = undefined;
         const data_descriptor_len: usize = if (info.is_zip64) 24 else 16;
         if (self.readNoEof(cursor, data_descriptor_buffer[0..data_descriptor_len])) {
-            if (readInt32(&data_descriptor_buffer, 0) == oddo_signature) {
+            if (readInt32(&data_descriptor_buffer, 0) == z.oddo_signature) {
                 // this is a data descriptor
                 try self.dumper.write("\n");
                 try self.dumper.writeSectionHeader(cursor, "Optional Data Descriptor", .{});
@@ -371,7 +349,7 @@ pub const ZipfileDumper = struct {
 
                 var cdr_buffer: [46]u8 = undefined;
                 try self.readNoEof(cursor, cdr_buffer[0..]);
-                if (readInt32(&cdr_buffer, 0) != cfh_signature) {
+                if (readInt32(&cdr_buffer, 0) != z.cfh_signature) {
                     try self.dumper.writeSectionHeader(cursor, "WARNING: invalid central file header signature", .{});
                     try self.dumper.write("\n");
                     return 0;
@@ -527,7 +505,7 @@ pub const ZipfileDumper = struct {
         var buf: [0xffff]u8 = undefined;
         const buffer = buf[0..extra_fields_length];
         try self.readNoEof(offset, buffer);
-        var it = ExtraFieldIterator{ .extra_fields = buffer };
+        var it = z.ExtraFieldIterator{ .extra_fields = buffer };
 
         while (try it.next()) |extra_field| {
             const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
@@ -558,41 +536,9 @@ pub const ZipfileDumper = struct {
         }
     }
 
-    const ExtraFieldIterator = struct {
-        extra_fields: []const u8,
-        cursor: u16 = 0,
-        pub fn next(self: *@This()) !?ExtraField {
-            if (self.cursor >= self.extra_fields.len -| 3) return null;
-            const tag = readInt16(self.extra_fields, self.cursor);
-            const size = readInt16(self.extra_fields, self.cursor + 2);
-            if (self.cursor + 4 > self.extra_fields.len -| size) return error.ExtraFieldSizeExceedsExtraFieldsBuffer;
-            const entire_buffer = self.extra_fields[self.cursor .. self.cursor + 4 + size];
-            self.cursor += 4 + size;
-            return .{
-                .tag = tag,
-                .entire_buffer = entire_buffer,
-            };
-        }
-        pub fn trailingPadding(self: @This()) []const u8 {
-            return self.extra_fields[self.cursor..];
-        }
-    };
-    const ExtraField = struct {
-        tag: u16,
-        entire_buffer: []const u8,
-    };
-
     fn readNoEof(self: *Self, offset: u64, buffer: []u8) !void {
         try self.input_file.seekTo(offset);
         try self.input_file.reader().readNoEof(buffer);
-    }
-    fn readInt32At(self: *Self, offset: u64) !u32 {
-        var buffer: [4]u8 = undefined;
-        try self.readNoEof(offset, buffer[0..]);
-        return readInt32(&buffer, 0);
-    }
-    fn isSignatureAt(self: *Self, offset: u64, signature: u32) bool {
-        return signature == (self.readInt32At(offset) catch return false);
     }
 };
 

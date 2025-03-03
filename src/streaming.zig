@@ -2,30 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const Hexdumper = @import("./Hexdumper.zig");
-
-const zip64_eocdr_size = 56;
-const zip64_eocdl_size = 20;
-const eocdr_size = 22;
-const eocdr_search_size: u64 = zip64_eocdl_size + 0xffff + eocdr_size;
-
-/// local file header signature
-const lfh_signature = 0x04034b50;
-
-/// optional data descriptor optional signature
-const oddo_signature = 0x08074b50;
-const oddo_signature_bytes = [4]u8{ 0x50, 0x4b, 0x07, 0x08 };
-
-/// central file header signature
-const cfh_signature = 0x02014b50;
-
-/// zip64 end of central dir signature
-const zip64_eocdr_signature = 0x06064b50;
-
-/// zip64 end of central dir locator signature
-const zip64_eocdl_signature = 0x07064b50;
-
-/// end of central dir signature
-const eocdr_signature = 0x06054b50;
+const z = @import("./zipfile.zig");
 
 pub const StreamingDumper = struct {
     input_file: std.fs.File,
@@ -57,23 +34,23 @@ pub const StreamingDumper = struct {
         while (true) {
             const signature = try self.peekSignature();
             switch (signature) {
-                lfh_signature => {
+                z.lfh_signature => {
                     if (!(position == .start or position == .local_stuff)) return error.WrongSignature;
                     position = .local_stuff;
                     try self.consumeLocalFile();
                 },
-                cfh_signature => {
+                z.cfh_signature => {
                     if (position == .local_stuff) {
                         position = .central_directory;
                     } else if (position != .central_directory) return error.WrongSignature;
                     try self.consumeCentralFileHeader();
                 },
-                zip64_eocdr_signature => {
+                z.zip64_eocdr_signature => {
                     if (!(position == .start or position == .central_directory)) return error.WrongSignature;
                     try self.consumeZip64End();
                     break;
                 },
-                eocdr_signature => {
+                z.eocdr_signature => {
                     if (!(position == .start or position == .central_directory)) return error.WrongSignature;
                     try self.consumeEnd();
                     break;
@@ -147,7 +124,7 @@ pub const StreamingDumper = struct {
             }
 
             // Optional data descriptor is optional
-            if (oddo_signature == try self.peekSignature()) {
+            if (z.oddo_signature == try self.peekSignature()) {
                 try self.consumeDataDescriptor(is_zip64);
             }
         } else {
@@ -162,12 +139,12 @@ pub const StreamingDumper = struct {
                 assert(self.put_back_signature == null);
                 const b = try self.input.reader().readByte();
                 self.offset += 1;
-                if (b == oddo_signature_bytes[oddo_signature_cursor]) {
+                if (b == z.oddo_signature_bytes[oddo_signature_cursor]) {
                     // Maybe?
                     oddo_signature_cursor += 1;
                     if (oddo_signature_cursor == 4) {
                         // Done.
-                        self.put_back_signature = oddo_signature_bytes;
+                        self.put_back_signature = z.oddo_signature_bytes;
                         self.offset -= 4;
                         try self.dumper.write("\n");
 
@@ -180,14 +157,14 @@ pub const StreamingDumper = struct {
                         // Flush what we've optimistically found so far.
                         const mid_buffer_row_wrap = @min(oddo_signature_cursor, row_length - row_cursor);
                         row_cursor += oddo_signature_cursor;
-                        for (oddo_signature_bytes[0..mid_buffer_row_wrap]) |b_| {
+                        for (z.oddo_signature_bytes[0..mid_buffer_row_wrap]) |b_| {
                             try self.dumper.printf("{x:0>2}", .{b_});
                         }
                         if (row_cursor >= row_length) {
                             row_cursor -= row_length;
                             try self.dumper.printf("\n", .{});
                         }
-                        for (oddo_signature_bytes[mid_buffer_row_wrap..oddo_signature_cursor]) |b_| {
+                        for (z.oddo_signature_bytes[mid_buffer_row_wrap..oddo_signature_cursor]) |b_| {
                             try self.dumper.printf("{x:0>2}", .{b_});
                         }
                         oddo_signature_cursor = 0;
@@ -319,7 +296,7 @@ pub const StreamingDumper = struct {
             }
         }
 
-        if (zip64_eocdl_signature != try self.peekSignature()) return error.ExpectedZip64EndOfCentralDirectoryLocator;
+        if (z.zip64_eocdl_signature != try self.peekSignature()) return error.ExpectedZip64EndOfCentralDirectoryLocator;
         try self.dumper.write("\n");
         try self.dumper.writeSectionHeader(self.offset, "zip64 end of central directory locator", .{});
         {
@@ -335,7 +312,7 @@ pub const StreamingDumper = struct {
             assert(cursor == buffer.len);
         }
 
-        if (eocdr_signature != try self.peekSignature()) return error.ExpectedEndOfCentralDirectoryRecord;
+        if (z.eocdr_signature != try self.peekSignature()) return error.ExpectedEndOfCentralDirectoryRecord;
         try self.consumeEnd();
     }
 
@@ -387,11 +364,6 @@ pub const StreamingDumper = struct {
         }
     }
 
-    fn writeBlob(self: *Self, buffer: []const u8, config: Hexdumper.BlobConfig) !void {
-        var partial_utf8_state = Hexdumper.PartialUtf8State{};
-        try self.dumper.writeBlobPart(buffer, config, true, true, &partial_utf8_state);
-    }
-
     fn consumeExtraFields(
         self: *Self,
         extra_fields_length: u16,
@@ -405,7 +377,7 @@ pub const StreamingDumper = struct {
         var buf: [0xffff]u8 = undefined;
         const buffer = buf[0..extra_fields_length];
         try self.readNoEof(buffer);
-        var it = ExtraFieldIterator{ .extra_fields = buffer };
+        var it = z.ExtraFieldIterator{ .extra_fields = buffer };
 
         while (try it.next()) |extra_field| {
             const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
@@ -443,11 +415,11 @@ pub const StreamingDumper = struct {
                     }
                     const extra = extra_field.entire_buffer[cursor..];
                     if (extra.len > 0) {
-                        try self.writeBlob(extra, .{});
+                        try self.dumper.writeBlob(extra, .{});
                     }
                 },
                 else => {
-                    try self.writeBlob(extra_field.entire_buffer[4..], .{});
+                    try self.dumper.writeBlob(extra_field.entire_buffer[4..], .{});
                 },
             }
         }
@@ -458,33 +430,9 @@ pub const StreamingDumper = struct {
             try self.dumper.writeSectionHeader(section_offset, "(unused space)", .{});
             self.dumper.indent();
             defer self.dumper.outdent();
-            try self.writeBlob(padding, .{});
+            try self.dumper.writeBlob(padding, .{});
         }
     }
-
-    const ExtraFieldIterator = struct {
-        extra_fields: []const u8,
-        cursor: u16 = 0,
-        pub fn next(self: *@This()) !?ExtraField {
-            if (self.cursor >= self.extra_fields.len -| 3) return null;
-            const tag = readInt16(self.extra_fields, self.cursor);
-            const size = readInt16(self.extra_fields, self.cursor + 2);
-            if (self.cursor + 4 > self.extra_fields.len -| size) return error.ExtraFieldSizeExceedsExtraFieldsBuffer;
-            const entire_buffer = self.extra_fields[self.cursor .. self.cursor + 4 + size];
-            self.cursor += 4 + size;
-            return .{
-                .tag = tag,
-                .entire_buffer = entire_buffer,
-            };
-        }
-        pub fn trailingPadding(self: @This()) []const u8 {
-            return self.extra_fields[self.cursor..];
-        }
-    };
-    const ExtraField = struct {
-        tag: u16,
-        entire_buffer: []const u8,
-    };
 
     fn peekSignature(self: *Self) !u32 {
         var sig_buf: [4]u8 = undefined;
