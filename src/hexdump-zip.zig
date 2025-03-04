@@ -282,6 +282,9 @@ pub const ZipfileDumper = struct {
         const is_utf8 = general_purpose_bit_flag & 0x800 != 0;
         const extra_fields_length = readInt16(&lfh_buffer, 28);
 
+        var compressed_size: u64 = readInt32(&lfh_buffer, 18);
+        var uncompressed_size: u64 = readInt32(&lfh_buffer, 22);
+
         if (file_name_length > 0) {
             self.dumper.indent();
             defer self.dumper.outdent();
@@ -295,7 +298,7 @@ pub const ZipfileDumper = struct {
             defer self.dumper.outdent();
             try self.dumper.write("\n");
             try self.dumper.writeSectionHeader(cursor, "Extra Fields", .{});
-            try self.readExtraFields(cursor, extra_fields_length);
+            try self.readExtraFields(cursor, extra_fields_length, null, &compressed_size, &uncompressed_size, null, null);
             cursor += extra_fields_length;
         }
 
@@ -382,6 +385,12 @@ pub const ZipfileDumper = struct {
                 const extra_fields_length = readInt16(&cdr_buffer, 30);
                 const file_comment_length = readInt16(&cdr_buffer, 32);
 
+                var is_zip64 = false;
+                var compressed_size: u64 = readInt32(&cdr_buffer, 20);
+                var uncompressed_size: u64 = readInt32(&cdr_buffer, 20);
+                var local_file_header_offset: u64 = readInt32(&cdr_buffer, 42);
+                var disk_number: u32 = readInt16(&cdr_buffer, 34);
+
                 if (file_name_length > 0) {
                     self.dumper.indent();
                     defer self.dumper.outdent();
@@ -393,7 +402,7 @@ pub const ZipfileDumper = struct {
                     self.dumper.indent();
                     defer self.dumper.outdent();
                     try self.dumper.writeSectionHeader(cursor, "Extra Fields", .{});
-                    try self.readExtraFields(cursor, extra_fields_length);
+                    try self.readExtraFields(cursor, extra_fields_length, &is_zip64, &compressed_size, &uncompressed_size, &local_file_header_offset, &disk_number);
                     cursor += extra_fields_length;
                 }
                 if (file_comment_length > 0) {
@@ -501,39 +510,21 @@ pub const ZipfileDumper = struct {
         }
     }
 
-    fn readExtraFields(self: *Self, offset: u64, extra_fields_length: u16) !void {
+    fn readExtraFields(
+        self: *Self,
+        offset: u64,
+        extra_fields_length: u16,
+        out_is_zip64: ?*bool,
+        compressed_size: *u64,
+        uncompressed_size: *u64,
+        local_file_header_offset: ?*u64,
+        disk_number: ?*u32,
+    ) !void {
         var buf: [0xffff]u8 = undefined;
         const buffer = buf[0..extra_fields_length];
         try self.readNoEof(offset, buffer);
-        var it = z.ExtraFieldIterator{ .extra_fields = buffer };
 
-        while (try it.next()) |extra_field| {
-            const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
-            switch (extra_field.tag) {
-                0x0001 => try self.dumper.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag}),
-                else => try self.dumper.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag}),
-            }
-            self.dumper.indent();
-            defer self.dumper.outdent();
-            var cursor: usize = 0;
-            try self.dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Tag");
-            try self.dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Size");
-            switch (extra_field.tag) {
-                //0x0001 => {},
-                else => {
-                    try self.dumper.writeBlob(extra_field.entire_buffer[4..], .{});
-                },
-            }
-        }
-
-        const padding = it.trailingPadding();
-        if (padding.len > 0) {
-            const section_offset = offset + @as(u64, @intCast(padding.ptr - buffer.ptr));
-            try self.dumper.writeSectionHeader(section_offset, "(unused space)", .{});
-            self.dumper.indent();
-            defer self.dumper.outdent();
-            try self.dumper.writeBlob(padding, .{});
-        }
+        return z.dumpExtraFields(&self.dumper, offset, buffer, out_is_zip64, compressed_size, uncompressed_size, local_file_header_offset, disk_number);
     }
 
     fn readNoEof(self: *Self, offset: u64, buffer: []u8) !void {

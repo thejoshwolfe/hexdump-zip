@@ -377,61 +377,8 @@ pub const StreamingDumper = struct {
         var buf: [0xffff]u8 = undefined;
         const buffer = buf[0..extra_fields_length];
         try self.readNoEof(buffer);
-        var it = z.ExtraFieldIterator{ .extra_fields = buffer };
 
-        while (try it.next()) |extra_field| {
-            const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
-            switch (extra_field.tag) {
-                0x0001 => try self.dumper.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag}),
-                else => try self.dumper.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag}),
-            }
-            self.dumper.indent();
-            defer self.dumper.outdent();
-            var cursor: usize = 0;
-            try self.dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Tag");
-            try self.dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Size");
-            switch (extra_field.tag) {
-                0x0001 => {
-                    if (out_is_zip64) |is_zip64| is_zip64.* = true;
-                    if (compressed_size.* == 0xffffffff) {
-                        if (cursor + 8 < extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                        compressed_size.* = readInt64(extra_field.entire_buffer, cursor);
-                        try self.dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Compressed Size");
-                    }
-                    if (uncompressed_size.* == 0xffffffff) {
-                        if (cursor + 8 < extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                        uncompressed_size.* = readInt64(extra_field.entire_buffer, cursor);
-                        try self.dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Uncompressed Size");
-                    }
-                    if (local_file_header_offset != null and local_file_header_offset.?.* == 0xffffffff) {
-                        if (cursor + 8 < extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                        local_file_header_offset.?.* = readInt64(extra_field.entire_buffer, cursor);
-                        try self.dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Local File Header Offset");
-                    }
-                    if (disk_number != null and disk_number.?.* == 0xffffffff) {
-                        if (cursor + 4 < extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                        disk_number.?.* = readInt32(extra_field.entire_buffer, cursor);
-                        try self.dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 4, "Disk Number");
-                    }
-                    const extra = extra_field.entire_buffer[cursor..];
-                    if (extra.len > 0) {
-                        try self.dumper.writeBlob(extra, .{});
-                    }
-                },
-                else => {
-                    try self.dumper.writeBlob(extra_field.entire_buffer[4..], .{});
-                },
-            }
-        }
-
-        const padding = it.trailingPadding();
-        if (padding.len > 0) {
-            const section_offset = offset + @as(u64, @intCast(padding.ptr - buffer.ptr));
-            try self.dumper.writeSectionHeader(section_offset, "(unused space)", .{});
-            self.dumper.indent();
-            defer self.dumper.outdent();
-            try self.dumper.writeBlob(padding, .{});
-        }
+        return z.dumpExtraFields(&self.dumper, offset, buffer, out_is_zip64, compressed_size, uncompressed_size, local_file_header_offset, disk_number);
     }
 
     fn peekSignature(self: *Self) !u32 {

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Hexdumper = @import("./Hexdumper.zig");
+
 pub const zip64_eocdr_size = 56;
 pub const zip64_eocdl_size = 20;
 pub const eocdr_size = 22;
@@ -48,6 +50,79 @@ pub const ExtraField = struct {
     entire_buffer: []const u8,
 };
 
+pub fn dumpExtraFields(
+    dumper: *Hexdumper,
+    offset: u64,
+    buffer: []const u8,
+    out_is_zip64: ?*bool,
+    compressed_size: *u64,
+    uncompressed_size: *u64,
+    local_file_header_offset: ?*u64,
+    disk_number: ?*u32,
+) !void {
+    var it = ExtraFieldIterator{ .extra_fields = buffer };
+
+    while (try it.next()) |extra_field| {
+        const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
+        switch (extra_field.tag) {
+            0x0001 => try dumper.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag}),
+            else => try dumper.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag}),
+        }
+        dumper.indent();
+        defer dumper.outdent();
+        var cursor: usize = 0;
+        try dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Tag");
+        try dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Size");
+        switch (extra_field.tag) {
+            0x0001 => {
+                if (out_is_zip64) |is_zip64| is_zip64.* = true;
+                if (compressed_size.* == 0xffffffff) {
+                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
+                    compressed_size.* = readInt64(extra_field.entire_buffer, cursor);
+                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Compressed Size");
+                }
+                if (uncompressed_size.* == 0xffffffff) {
+                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
+                    uncompressed_size.* = readInt64(extra_field.entire_buffer, cursor);
+                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Uncompressed Size");
+                }
+                if (local_file_header_offset != null and local_file_header_offset.?.* == 0xffffffff) {
+                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
+                    local_file_header_offset.?.* = readInt64(extra_field.entire_buffer, cursor);
+                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Local File Header Offset");
+                }
+                if (disk_number != null and disk_number.?.* == 0xffffffff) {
+                    if (cursor + 4 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
+                    disk_number.?.* = readInt32(extra_field.entire_buffer, cursor);
+                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 4, "Disk Number");
+                }
+                const extra = extra_field.entire_buffer[cursor..];
+                if (extra.len > 0) {
+                    try dumper.writeBlob(extra, .{});
+                }
+            },
+            else => {
+                try dumper.writeBlob(extra_field.entire_buffer[4..], .{});
+            },
+        }
+    }
+
+    const padding = it.trailingPadding();
+    if (padding.len > 0) {
+        const section_offset = offset + @as(u64, @intCast(padding.ptr - buffer.ptr));
+        try dumper.writeSectionHeader(section_offset, "(unused space)", .{});
+        dumper.indent();
+        defer dumper.outdent();
+        try dumper.writeBlob(padding, .{});
+    }
+}
+
 fn readInt16(buffer: []const u8, offset: usize) u16 {
     return std.mem.readInt(u16, buffer[offset..][0..2], .little);
+}
+fn readInt32(buffer: []const u8, offset: usize) u32 {
+    return std.mem.readInt(u32, buffer[offset..][0..4], .little);
+}
+fn readInt64(buffer: []const u8, offset: usize) u64 {
+    return std.mem.readInt(u64, buffer[offset..][0..8], .little);
 }
