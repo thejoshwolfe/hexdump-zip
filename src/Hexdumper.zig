@@ -33,72 +33,75 @@ pub fn readStructField(
         2 => {
             const value = readInt16(buffer, cursor.*);
             try self.printf( //
-                "{x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
-                " ; \"{s}{s}\"" ++ (" " ** (max_size - size)) ++
-                " ; {d:0>" ++ decimal_width_str ++ "}" ++
-                " ; 0x{x:0>4}" ++ ("  " ** (max_size - size)) ++
-                " ; {s}" ++
-                "\n", .{
-                buffer[cursor.* + 0],
-                buffer[cursor.* + 1],
-                cp437[buffer[cursor.* + 0]],
-                cp437[buffer[cursor.* + 1]],
-                value,
-                value,
-                name,
-            });
+                "" ++
+                    "{x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{s}{s}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>4}" ++ ("  " ** (max_size - size)) ++
+                    " ; {s}" ++
+                    "\n", .{
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
+                    value,
+                    value,
+                    name,
+                });
         },
         4 => {
             const value = readInt32(buffer, cursor.*);
             try self.printf( //
-                "{x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
-                " ; \"{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
-                " ; {d:0>" ++ decimal_width_str ++ "}" ++
-                " ; 0x{x:0>8}" ++ ("  " ** (max_size - size)) ++
-                " ; {s}" ++
-                "\n", .{
-                buffer[cursor.* + 0],
-                buffer[cursor.* + 1],
-                buffer[cursor.* + 2],
-                buffer[cursor.* + 3],
-                cp437[buffer[cursor.* + 0]],
-                cp437[buffer[cursor.* + 1]],
-                cp437[buffer[cursor.* + 2]],
-                cp437[buffer[cursor.* + 3]],
-                value,
-                value,
-                name,
-            });
+                "" ++
+                    "{x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>8}" ++ ("  " ** (max_size - size)) ++
+                    " ; {s}" ++
+                    "\n", .{
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    buffer[cursor.* + 2],
+                    buffer[cursor.* + 3],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
+                    cp437[buffer[cursor.* + 2]],
+                    cp437[buffer[cursor.* + 3]],
+                    value,
+                    value,
+                    name,
+                });
         },
         8 => {
             const value = readInt64(buffer, cursor.*);
             try self.printf( //
-                "{x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
-                " ; \"{s}{s}{s}{s}{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
-                " ; {d:0>" ++ decimal_width_str ++ "}" ++
-                " ; 0x{x:0>16}" ++ ("  " ** (max_size - size)) ++
-                " ; {s}" ++
-                "\n", .{
-                buffer[cursor.* + 0],
-                buffer[cursor.* + 1],
-                buffer[cursor.* + 2],
-                buffer[cursor.* + 3],
-                buffer[cursor.* + 4],
-                buffer[cursor.* + 5],
-                buffer[cursor.* + 6],
-                buffer[cursor.* + 7],
-                cp437[buffer[cursor.* + 0]],
-                cp437[buffer[cursor.* + 1]],
-                cp437[buffer[cursor.* + 2]],
-                cp437[buffer[cursor.* + 3]],
-                cp437[buffer[cursor.* + 4]],
-                cp437[buffer[cursor.* + 5]],
-                cp437[buffer[cursor.* + 6]],
-                cp437[buffer[cursor.* + 7]],
-                value,
-                value,
-                name,
-            });
+                "" ++
+                    "{x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{s}{s}{s}{s}{s}{s}{s}{s}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>16}" ++ ("  " ** (max_size - size)) ++
+                    " ; {s}" ++
+                    "\n", .{
+                    buffer[cursor.* + 0],
+                    buffer[cursor.* + 1],
+                    buffer[cursor.* + 2],
+                    buffer[cursor.* + 3],
+                    buffer[cursor.* + 4],
+                    buffer[cursor.* + 5],
+                    buffer[cursor.* + 6],
+                    buffer[cursor.* + 7],
+                    cp437[buffer[cursor.* + 0]],
+                    cp437[buffer[cursor.* + 1]],
+                    cp437[buffer[cursor.* + 2]],
+                    cp437[buffer[cursor.* + 3]],
+                    cp437[buffer[cursor.* + 4]],
+                    cp437[buffer[cursor.* + 5]],
+                    cp437[buffer[cursor.* + 6]],
+                    cp437[buffer[cursor.* + 7]],
+                    value,
+                    value,
+                    name,
+                });
         },
         else => unreachable,
     }
