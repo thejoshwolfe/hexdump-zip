@@ -288,22 +288,23 @@ pub const ZipfileDumper = struct {
         if (file_name_length > 0) {
             self.dumper.indent();
             defer self.dumper.outdent();
-            try self.dumper.write("\n");
             try self.dumper.writeSectionHeader(cursor, "File Name", .{});
+            self.dumper.indent();
+            defer self.dumper.outdent();
             try self.dumpBlob(cursor, file_name_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
             cursor += file_name_length;
         }
         if (extra_fields_length > 0) {
             self.dumper.indent();
             defer self.dumper.outdent();
-            try self.dumper.write("\n");
             try self.dumper.writeSectionHeader(cursor, "Extra Fields", .{});
+            self.dumper.indent();
+            defer self.dumper.outdent();
             try self.readExtraFields(cursor, extra_fields_length, null, &compressed_size, &uncompressed_size, null, null);
             cursor += extra_fields_length;
         }
 
         if (info.compressed_size > 0) {
-            try self.dumper.write("\n");
             try self.dumper.writeSectionHeader(cursor, "File Contents", .{});
             try self.dumpBlob(cursor, info.compressed_size, .{
                 .row_length = 512,
@@ -395,6 +396,8 @@ pub const ZipfileDumper = struct {
                     self.dumper.indent();
                     defer self.dumper.outdent();
                     try self.dumper.writeSectionHeader(cursor, "File name", .{});
+                    self.dumper.indent();
+                    defer self.dumper.outdent();
                     try self.dumpBlob(cursor, file_name_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
                     cursor += file_name_length;
                 }
@@ -402,6 +405,8 @@ pub const ZipfileDumper = struct {
                     self.dumper.indent();
                     defer self.dumper.outdent();
                     try self.dumper.writeSectionHeader(cursor, "Extra Fields", .{});
+                    self.dumper.indent();
+                    defer self.dumper.outdent();
                     try self.readExtraFields(cursor, extra_fields_length, &is_zip64, &compressed_size, &uncompressed_size, &local_file_header_offset, &disk_number);
                     cursor += extra_fields_length;
                 }
@@ -409,6 +414,8 @@ pub const ZipfileDumper = struct {
                     self.dumper.indent();
                     defer self.dumper.outdent();
                     try self.dumper.writeSectionHeader(cursor, "File Comment", .{});
+                    self.dumper.indent();
+                    defer self.dumper.outdent();
                     try self.dumpBlob(cursor, file_comment_length, .{ .encoding = if (is_utf8) .utf8 else .cp437 });
                     cursor += file_comment_length;
                 }
@@ -487,6 +494,8 @@ pub const ZipfileDumper = struct {
             self.dumper.indent();
             defer self.dumper.outdent();
             try self.dumper.writeSectionHeader(offset + cursor, ".ZIP file comment", .{});
+            self.dumper.indent();
+            defer self.dumper.outdent();
             try self.dumpBlob(offset + cursor, comment_length, .{ .encoding = .cp437 });
             cursor += comment_length;
         }
