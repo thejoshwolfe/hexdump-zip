@@ -50,6 +50,12 @@ pub const ExtraField = struct {
     entire_buffer: []const u8,
 };
 
+fn dumpExtraFieldHeader(dumper: *Hexdumper, entire_buffer: []const u8, cursor: *usize) !void {
+    dumper.indent(); // defer outdent after this.
+    try dumper.readStructField(entire_buffer, 2, cursor, 2, "Tag");
+    try dumper.readStructField(entire_buffer, 2, cursor, 2, "Size");
+}
+
 pub fn dumpExtraFields(
     dumper: *Hexdumper,
     offset: u64,
@@ -63,47 +69,111 @@ pub fn dumpExtraFields(
     var it = ExtraFieldIterator{ .extra_fields = buffer };
 
     while (try it.next()) |extra_field| {
-        const section_offset = offset + @as(u64, @intCast(extra_field.entire_buffer.ptr - buffer.ptr));
-        switch (extra_field.tag) {
-            0x0001 => try dumper.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag}),
-            else => try dumper.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag}),
-        }
-        dumper.indent();
-        defer dumper.outdent();
+        const field_buffer = extra_field.entire_buffer;
+        const section_offset = offset + @as(u64, @intCast(field_buffer.ptr - buffer.ptr));
         var cursor: usize = 0;
-        try dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Tag");
-        try dumper.readStructField(extra_field.entire_buffer, 2, &cursor, 2, "Size");
+        defer dumper.outdent(); // indented in dumpExtraFieldHeader
         switch (extra_field.tag) {
             0x0001 => {
+                try dumper.writeSectionHeader(section_offset, "ZIP64 Extended Information Extra Field (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
+
                 if (out_is_zip64) |is_zip64| is_zip64.* = true;
+                const max_size = 8;
                 if (compressed_size.* == 0xffffffff) {
-                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                    compressed_size.* = readInt64(extra_field.entire_buffer, cursor);
-                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Compressed Size");
+                    if (cursor + 8 > field_buffer.len) return error.InternalBufferOverflow;
+                    compressed_size.* = readInt64(field_buffer, cursor);
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Compressed Size");
                 }
                 if (uncompressed_size.* == 0xffffffff) {
-                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                    uncompressed_size.* = readInt64(extra_field.entire_buffer, cursor);
-                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Uncompressed Size");
+                    if (cursor + 8 > field_buffer.len) return error.InternalBufferOverflow;
+                    uncompressed_size.* = readInt64(field_buffer, cursor);
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Uncompressed Size");
                 }
                 if (local_file_header_offset != null and local_file_header_offset.?.* == 0xffffffff) {
-                    if (cursor + 8 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                    local_file_header_offset.?.* = readInt64(extra_field.entire_buffer, cursor);
-                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 8, "Local File Header Offset");
+                    if (cursor + 8 > field_buffer.len) return error.InternalBufferOverflow;
+                    local_file_header_offset.?.* = readInt64(field_buffer, cursor);
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Local File Header Offset");
                 }
                 if (disk_number != null and disk_number.?.* == 0xffffffff) {
-                    if (cursor + 4 > extra_field.entire_buffer.len) return error.InternalBufferOverflow;
-                    disk_number.?.* = readInt32(extra_field.entire_buffer, cursor);
-                    try dumper.readStructField(extra_field.entire_buffer, 8, &cursor, 4, "Disk Number");
+                    if (cursor + 4 > field_buffer.len) return error.InternalBufferOverflow;
+                    disk_number.?.* = readInt32(field_buffer, cursor);
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "Disk Number");
                 }
-                const extra = extra_field.entire_buffer[cursor..];
-                if (extra.len > 0) {
-                    try dumper.writeBlob(extra, .{});
+            },
+            0x5455 => {
+                try dumper.writeSectionHeader(section_offset, "Info-ZIP Universal Time (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
+
+                // See the Info-ZIP source code proginfo/extrafld.txt
+                const has_mtime = 1;
+                if (field_buffer[cursor..].len >= 5 and field_buffer[cursor] & has_mtime != 0) {
+                    const max_size = 4;
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 1, "flags");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "mtime");
+                }
+            },
+            0x7875 => {
+                try dumper.writeSectionHeader(section_offset, "Info-ZIP Unix 32-bit uid/gid (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
+
+                // See the Info-ZIP source code proginfo/extrafld.txt
+                if (field_buffer[cursor..].len >= 11 and
+                    field_buffer[cursor] == 1 and // version
+                    field_buffer[cursor + 1] == 4 and // UIDSize
+                    field_buffer[cursor + 6] == 4 and // GIDSize
+                    true)
+                {
+                    const max_size = 4;
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 1, "version (always 1)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 1, "UIDSize (always 4)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "UID");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 1, "GIDSize (always 4)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "GID");
+                }
+            },
+            0x7075 => {
+                try dumper.writeSectionHeader(section_offset, "Info-ZIP Unicode Path (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
+
+                // See the Info-ZIP source code proginfo/extrafld.txt
+                if (field_buffer[cursor..].len >= 5 and field_buffer[cursor] == 1) {
+                    const max_size = 4;
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 1, "version (always 1)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "Old Name CRC32");
+                    try dumper.writeBlob(field_buffer[cursor..], .{ .encoding = .utf8 });
+                    cursor = field_buffer.len;
+                }
+            },
+            0x000a => {
+                try dumper.writeSectionHeader(section_offset, "NTFS (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
+
+                // This is documented in APPNOTE since version 4.5.
+                if (field_buffer[cursor..].len >= 32 and
+                    readInt32(field_buffer, cursor) == 0 and // Reserved
+                    readInt16(field_buffer, cursor + 4) == 1 and // Tag for attribute #1
+                    readInt16(field_buffer, cursor + 6) == 24 and // Size of attribute #1, in bytes (24)
+                    true)
+                {
+                    const max_size = 8;
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 4, "Reserved (always 0)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 2, "Tag (always 1)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 2, "Size (always 24)");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Mtime");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Atime");
+                    try dumper.readStructField(field_buffer, max_size, &cursor, 8, "Ctime");
                 }
             },
             else => {
-                try dumper.writeBlob(extra_field.entire_buffer[4..], .{});
+                try dumper.writeSectionHeader(section_offset, "Unknown Extra Field (0x{x:0>4})", .{extra_field.tag});
+                try dumpExtraFieldHeader(dumper, field_buffer, &cursor);
             },
+        }
+
+        const extra = field_buffer[cursor..];
+        if (extra.len > 0) {
+            try dumper.writeBlob(extra, .{});
         }
     }
 

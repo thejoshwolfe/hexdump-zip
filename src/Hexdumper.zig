@@ -22,6 +22,7 @@ pub fn readStructField(
 ) !void {
     comptime assert(size <= max_size);
     const decimal_width_str = comptime switch (max_size) {
+        1 => "3",
         2 => "5",
         4 => "10",
         8 => "20",
@@ -30,6 +31,23 @@ pub fn readStructField(
 
     try self.printIndentation();
     switch (size) {
+        1 => {
+            const value = buffer[cursor.*];
+            try self.printf( //
+                "" ++
+                    "{x:0>2}" ++ ("   " ** (max_size - size)) ++
+                    " ; \"{s}\"" ++ (" " ** (max_size - size)) ++
+                    " ; {d:0>" ++ decimal_width_str ++ "}" ++
+                    " ; 0x{x:0>2}" ++ ("  " ** (max_size - size)) ++
+                    " ; {s}" ++
+                    "\n", .{
+                    buffer[cursor.* + 0],
+                    cp437[buffer[cursor.* + 0]],
+                    value,
+                    value,
+                    name,
+                });
+        },
         2 => {
             const value = readInt16(buffer, cursor.*);
             try self.printf( //
